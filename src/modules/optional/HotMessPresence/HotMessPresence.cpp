@@ -183,7 +183,7 @@ class HotMessPresenceModule : public SinglePortModule, private concurrency::OSTh
     void computeFirmwareIdentity()
     {
         unsigned a = 0, b = 0, c = 0;
-        sscanf(APP_VERSION_SHORT, "%u.%u.%u", &a, &b, &c);
+        sscanf(optstr(APP_VERSION_SHORT), "%u.%u.%u", &a, &b, &c);
         fwVersion[0] = (uint8_t)a;
         fwVersion[1] = (uint8_t)b;
         fwVersion[2] = (uint8_t)c;

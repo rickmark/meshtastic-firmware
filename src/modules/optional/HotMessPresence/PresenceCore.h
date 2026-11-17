@@ -214,8 +214,8 @@ enum Command : uint8_t {
     CMD_ROTATE_ADMIN_KEY = 0x08,
     CMD_PROVISION = 0x10, // local only
     // Unsolicited reports from the beacon
-    REPORT_MOVED = 0x90,
-    REPORT_BOOT = 0x91
+    REPORT_MOVED = 0xA0,
+    REPORT_BOOT = 0xA1
 };
 enum ReplyStatus : uint8_t {
     ST_OK = 0,
@@ -245,7 +245,7 @@ bool verifyAdminCommand(const uint8_t *buf, size_t len, const uint8_t adminPub[3
 size_t buildAdminCommand(uint8_t *out, size_t cap, uint8_t command, uint32_t target, uint64_t counter, const uint8_t *body,
                          size_t bodyLen, const uint8_t priv[32], const uint8_t pub[32]);
 
-// Reply: [0] 0x01 [1] command | 0x80 (reports use their own code) [2..5] beacon node [6..13] echoed
+// Reply: [0] 0x01 [1] command | 0x80 (unsolicited reports use 0xA0+) [2..5] beacon node [6..13] echoed
 // counter [14] status [15..] body [last 64] beacon Ed25519 signature over "HMPR1" || everything before it.
 static const size_t REPLY_HEADER_LEN = 15;
 size_t buildReply(uint8_t *out, size_t cap, uint8_t code, uint32_t beaconId, uint64_t counter, uint8_t status,

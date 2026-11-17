@@ -49,8 +49,9 @@ jobs:
       - name: Firmware hash (matches the status frame's fw hash prefix)
         run: |
           cd .pio/build/t-echo
-          ls -l
-          ~/.platformio/packages/toolchain-gccarmnoneeabi/bin/arm-none-eabi-objcopy -O binary firmware.elf firmware.bin
+          ls -l *.elf *.hex *.uf2 *.zip 2>/dev/null || true
+          ELF=$(ls -t *.elf | head -1)
+          ~/.platformio/packages/toolchain-gccarmnoneeabi/bin/arm-none-eabi-objcopy -O binary "$ELF" firmware.bin
           sha256sum firmware.bin | tee firmware.bin.sha256
           echo "### t-echo ${{ matrix.flavor }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -60,8 +61,8 @@ jobs:
         with:
           name: t-echo-${{ matrix.flavor }}
           path: |
-            .pio/build/t-echo/firmware*.uf2
-            .pio/build/t-echo/firmware*.hex
-            .pio/build/t-echo/firmware*.zip
+            .pio/build/t-echo/*.uf2
+            .pio/build/t-echo/*.hex
+            .pio/build/t-echo/*.zip
             .pio/build/t-echo/firmware.bin
             .pio/build/t-echo/firmware.bin.sha256
