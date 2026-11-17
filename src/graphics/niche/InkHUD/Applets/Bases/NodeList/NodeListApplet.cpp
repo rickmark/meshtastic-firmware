@@ -1,6 +1,6 @@
 #ifdef MESHTASTIC_INCLUDE_INKHUD
 
-#include "RTC.h"
+#include "gps/RTC.h"
 
 #include "GeoCoord.h"
 #include "NodeDB.h"
@@ -14,6 +14,42 @@ InkHUD::NodeListApplet::NodeListApplet(const char *name) : MeshModule(name)
     // We only need to be promiscuous in order to hear NodeInfo, apparently. See NodeInfoModule
     // For all other packets, we manually act as if isPromiscuous=false, in wantPacket
     MeshModule::isPromiscuous = true;
+
+    // Up / down scroll the list, for cards which don't fit on the tile
+    setInputsSubscribed(NAV_UP | NAV_DOWN, true);
+}
+
+uint16_t InkHUD::NodeListApplet::cardsTop()
+{
+    constexpr uint16_t padDivH = 2;
+    return (getHeaderHeight() - 1) + padDivH;
+}
+
+uint8_t InkHUD::NodeListApplet::maxScrollOffset()
+{
+    const uint16_t top = cardsTop();
+    const uint16_t fitting = (height() > top) ? std::max<uint16_t>((height() - top) / cardH, 1) : 1;
+    return cards.size() > fitting ? (uint8_t)(cards.size() - fitting) : 0;
+}
+
+void InkHUD::NodeListApplet::scrollBy(int8_t delta)
+{
+    const int next = std::clamp<int>((int)scrollOffset + delta, 0, maxScrollOffset());
+    if (next == scrollOffset)
+        return;
+
+    scrollOffset = (uint8_t)next;
+    requestUpdate(Drivers::EInk::UpdateTypes::FAST);
+}
+
+void InkHUD::NodeListApplet::onNavUp()
+{
+    scrollBy(-1);
+}
+
+void InkHUD::NodeListApplet::onNavDown()
+{
+    scrollBy(1);
 }
 
 // Do we want to process this packet with handleReceived()?
@@ -50,21 +86,23 @@ ProcessMessage InkHUD::NodeListApplet::handleReceived(const meshtastic_MeshPacke
     c.signal = getSignalStrength(mp.rx_snr, mp.rx_rssi);
 
     // Assemble info: from nodeDB (needed to detect changes)
-    meshtastic_NodeInfoLite *node = nodeDB->getMeshNode(c.nodeNum);
-    meshtastic_NodeInfoLite *ourNode = nodeDB->getMeshNode(nodeDB->getNodeNum());
+    const meshtastic_NodeInfoLite *node = nodeDB->getMeshNode(c.nodeNum);
+    const meshtastic_NodeInfoLite *ourNode = nodeDB->getMeshNode(nodeDB->getNodeNum());
     if (node) {
         if (node->has_hops_away)
             c.hopsAway = node->hops_away;
 
         if (nodeDB->hasValidPosition(node) && nodeDB->hasValidPosition(ourNode)) {
-            // Get lat and long as float
-            // Meshtastic stores these as integers internally
-            float ourLat = ourNode->position.latitude_i * 1e-7;
-            float ourLong = ourNode->position.longitude_i * 1e-7;
-            float theirLat = node->position.latitude_i * 1e-7;
-            float theirLong = node->position.longitude_i * 1e-7;
+            meshtastic_PositionLite ourPos;
+            meshtastic_PositionLite theirPos;
+            if (nodeDB->copyNodePosition(ourNode->num, ourPos) && nodeDB->copyNodePosition(node->num, theirPos)) {
+                float ourLat = ourPos.latitude_i * 1e-7;
+                float ourLong = ourPos.longitude_i * 1e-7;
+                float theirLat = theirPos.latitude_i * 1e-7;
+                float theirLong = theirPos.longitude_i * 1e-7;
 
-            c.distanceMeters = (int32_t)GeoCoord::latLongToMeter(theirLat, theirLong, ourLat, ourLong);
+                c.distanceMeters = (int32_t)GeoCoord::latLongToMeter(theirLat, theirLong, ourLat, ourLong);
+            }
         }
     }
 
@@ -149,8 +187,11 @@ void InkHUD::NodeListApplet::onRender(bool full)
         std::remove_if(cards.begin(), cards.end(), [](const CardInfo &c) { return nodeDB->getMeshNode(c.nodeNum) == nullptr; }),
         cards.end());
 
+    // Cards scrolled off the top are skipped. List may have shrunk since the user scrolled
+    scrollOffset = std::min<uint8_t>(scrollOffset, maxScrollOffset());
+
     // -- Each node in list --
-    for (auto card = cards.begin(); card != cards.end(); ++card) {
+    for (auto card = cards.begin() + scrollOffset; card != cards.end(); ++card) {
 
         // Gather info
         // ========================================
@@ -179,8 +220,8 @@ void InkHUD::NodeListApplet::onRender(bool full)
         // -- Longname --
         // Parse special chars in long name
         // Use node id if unknown
-        if (node && node->has_user)
-            longName = parse(node->user.long_name); // Found in nodeDB
+        if (nodeInfoLiteHasUser(node))
+            longName = parse(node->long_name); // Found in nodeDB
         else {
             // Not found in nodeDB, show a hex nodeid instead
             longName = hexifyNodeNum(nodeNum);
@@ -252,6 +293,8 @@ void InkHUD::NodeListApplet::onRender(bool full)
         if (cardTopY > height())
             break;
     }
+
+    drawScrollHints(scrollOffset > 0, scrollOffset < maxScrollOffset());
 }
 
 // Draw element: a "mobile phone" style signal indicator

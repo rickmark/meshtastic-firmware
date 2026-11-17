@@ -8,6 +8,11 @@
 #include <ArtronShop_RX8130CE.h>
 #endif
 
+#if HAS_LSE
+// True once the STM32WL LSE crystal has locked and the hardware RTC is running (see stm32wlSetup()).
+bool stm32wlRtcAvailable();
+#endif
+
 enum RTCQuality {
 
     /// We haven't had our RTC set yet
@@ -49,10 +54,36 @@ const char *RtcName(RTCQuality quality);
 /// Return time since 1970 in secs.  While quality is RTCQualityNone we will be returning time based at zero
 uint32_t getTime(bool local = false);
 
+/// UTC milliseconds since 1970, with the sub-second part of the last time source kept. Same caveats as getTime().
+uint64_t getUtcMillis();
+
+/// UTC microseconds since 1970. Resolution is the platform's: µs on ESP32/RP2040, ms elsewhere (Time::getMicrosMonotonic()).
+uint64_t getUtcMicros();
+
+/// Pin the clock to read utcUs at monotonic instant monoUs (Time::getMicrosMonotonic() timebase). For a source that
+/// already holds GPS quality and corrects often, such as PPS: no quality change, no hardware RTC write.
+void disciplineRTC(uint64_t monoUs, uint64_t utcUs);
+
+/// Largest rate trim setRTCRateTrimPpb() accepts. Crystals are good to ~±50 ppm; anything past this is a measuring error.
+constexpr int32_t MAX_RATE_TRIM_PPB = 500000;
+
+/// Correct for the monotonic clock's frequency error: the clock gains ppb ns per second elapsed. Clamped to
+/// ±MAX_RATE_TRIM_PPB. Keeps the time close between corrections, e.g. while the GPS sleeps.
+void setRTCRateTrimPpb(int32_t ppb);
+int32_t getRTCRateTrimPpb();
+
 /// Return time since 1970 in secs.  If quality is RTCQualityNone return zero
 uint32_t getValidTime(RTCQuality minQuality, bool local = false);
 
 RTCSetResult readFromRTC();
+
+#ifdef PIO_UNIT_TESTING
+void setBootRelativeTimeForUnitTest(uint32_t secondsSinceBoot);
+void resetRTCStateForTests();
+void setRTCSystemTimeForTests(const struct timeval *tv);
+void clearRTCSystemTimeForTests();
+void setReadFromRTCUseSystemTimeForTests(bool enabled);
+#endif
 
 time_t gm_mktime(const struct tm *tm);
 

@@ -39,6 +39,8 @@ class WindowManager;
 class InkHUD
 {
   public:
+    using TouchEnabledProvider = bool (*)();
+
     static InkHUD *getInstance(); // Access to this singleton class
 
     // Configuration
@@ -51,6 +53,14 @@ class InkHUD
 
     void begin();
 
+    // Optional touch-state provider for reusable touch status indicators.
+    void setTouchEnabledProvider(TouchEnabledProvider provider);
+    bool hasTouchEnabledProvider() const;
+    bool isTouchEnabled() const;
+    bool isTouchTimedOut() const;
+    void setTouchTimedOut(bool timedOut);
+    void setTouchSleeping(bool sleeping, bool async = true);
+
     // Handle user-button press
     // - connected to an input source, in variant nicheGraphics.h
 
@@ -62,6 +72,10 @@ class InkHUD
     void navDown();
     void navLeft();
     void navRight();
+    void touchNavUp();
+    void touchNavDown();
+    void touchTap(uint16_t x, uint16_t y);
+    void touchLongPress(uint16_t x, uint16_t y);
 
     // Freetext handlers
     void freeText(char c);
@@ -76,17 +90,27 @@ class InkHUD
     void prevApplet();
     NicheGraphics::InkHUD::Applet *getActiveApplet();
     void openMenu();
+    void openAppSwitcher();
     void openAlignStick();
+    void openAlignKeyboard();
     void openKeyboard();
     void closeKeyboard();
     void nextTile();
     void prevTile();
+    bool showApplet(uint8_t appletIndex);
+    bool selectTileAt(uint16_t x, uint16_t y);
     void rotate();
     void rotateJoystick(uint8_t angle = 1); // rotate 90 deg by default
     void toggleBatteryIcon();
 
     // Used by TipsApplet to force menu to start on Region selection
     bool forceRegionMenu = false;
+
+    // Input mode hint for devices that use a left/right rocker plus center button
+    bool twoWayRocker = false;
+
+    // Set by an input source that detected a physical keyboard at runtime: the on-screen keyboard is never shown
+    bool physicalKeyboard = false;
 
     // Updating the display
     // - called by various InkHUD components
@@ -126,6 +150,10 @@ class InkHUD
     Events *events = nullptr;               // Handle non-specific firmware events
     Renderer *renderer = nullptr;           // Co-ordinate display updates
     WindowManager *windowManager = nullptr; // Multiplexing of applets
+    TouchEnabledProvider touchEnabledProvider = nullptr;
+    bool touchTimedOut = false;
+    bool touchSleeping = false;
+    void refreshTouchStatus(bool async = true);
 };
 
 } // namespace NicheGraphics::InkHUD

@@ -52,8 +52,8 @@
 #define D14 14 // P0.05 OLED SCL
 #define D15 15 // P0.06 OLED SDA
 #define D16 16 // P0.31 VBAT_ADC
-#define D17 17 // P0.00 GROVE SDA
-#define D18 18 // P0.01 GROVE_SCL
+#define D17 17 // GROVE SCL
+#define D18 18 // GROVE SDA
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  Analog Pin Definitions
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -69,8 +69,8 @@
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  I2C Configuration
 #define HAS_WIRE 1
-#define PIN_WIRE_SDA D18 // P0.09
-#define PIN_WIRE_SCL D17 // P0.10
+#define PIN_WIRE_SDA D18 // Grove SDA (same pins as Wire1 on the OLED L1)
+#define PIN_WIRE_SCL D17 // Grove SCL
 #define WIRE_INTERFACES_COUNT 1
 
 static const uint8_t SDA = PIN_WIRE_SDA;
@@ -113,7 +113,9 @@ static const uint8_t SCL = PIN_WIRE_SCL;
 //  Power Management
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-#define BAT_READ 30 // D30 = P0.04  Reads battery voltage from divider on signal board.
+#define BAT_READ 30 // D30 = P0.04  Battery divider enable (BAT_CTL) on signal board.
+#define ADC_CTRL BAT_READ
+#define ADC_CTRL_ENABLED HIGH
 #define BATTERY_SENSE_RESOLUTION_BITS 12
 #define ADC_MULTIPLIER 2.0
 #define BATTERY_PIN PIN_VBAT // PIN_A7
@@ -135,7 +137,7 @@ static const uint8_t SCL = PIN_WIRE_SCL;
 
 #define PIN_GPS_STANDBY D0
 
-// #define GPS_DEBUG
+// #define GPS_DEBUG 1
 //  #define GPS_EN D18 // P1.05
 #endif
 

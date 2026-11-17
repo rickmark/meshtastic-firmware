@@ -5,9 +5,8 @@
 Shows the latest incoming text message, as well as sender.
 Both broadcast and direct messages will be shown here, from all channels.
 
-This module doesn't doesn't use the devicestate.rx_text_message,' as this is overwritten to contain outgoing messages
 This module doesn't collect its own text message. Instead, the WindowManager stores the most recent incoming text message.
-This is available to any interested modules (SingeMessageApplet, NotificationApplet etc.) via InkHUD::latestMessage
+This is available to any interested modules (SingleMessageApplet, NotificationApplet etc.) via InkHUD::latestMessage
 
 We do still receive notifications from the text message module though,
 to know when a new message has arrived, and trigger the update.
@@ -35,10 +34,18 @@ class AllMessageApplet : public Applet
     void onActivate() override;
     void onDeactivate() override;
     int onReceiveTextMessage(const meshtastic_MeshPacket *p);
+    void onNavUp() override;   // Scroll a long message up
+    void onNavDown() override; // Scroll a long message down
 
     bool approveNotification(Notification &n) override; // Which notifications to suppress
 
   protected:
+    void scrollBy(int direction);
+
+    uint16_t scrollY = 0;    // Pixels of the message text scrolled off the top
+    uint16_t maxScrollY = 0; // Set by onRender: how far the text can scroll
+    uint16_t scrollStep = 0; // Set by onRender: one line of the font in use
+
     // Used to register our text message callback
     CallbackObserver<AllMessageApplet, const meshtastic_MeshPacket *> textMessageObserver =
         CallbackObserver<AllMessageApplet, const meshtastic_MeshPacket *>(this, &AllMessageApplet::onReceiveTextMessage);

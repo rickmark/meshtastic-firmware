@@ -12,7 +12,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
   packages: write
 
 jobs:
@@ -21,7 +21,7 @@ jobs:
     with:
       distro: debian
       platform: linux/amd64
-      runs-on: ubuntu-24.04
+      runs-on: ubuntu-26.04
       push: true
     secrets: inherit
 
@@ -30,7 +30,7 @@ jobs:
     with:
       distro: debian
       platform: linux/arm64
-      runs-on: ubuntu-24.04-arm
+      runs-on: ubuntu-26.04-arm
       push: true
     secrets: inherit
 
@@ -39,7 +39,16 @@ jobs:
     with:
       distro: debian
       platform: linux/arm/v7
-      runs-on: ubuntu-24.04-arm
+      runs-on: ubuntu-26.04-arm
+      push: true
+    secrets: inherit
+
+  docker-debian-riscv64:
+    uses: ./.github/workflows/docker_build.yml
+    with:
+      distro: debian
+      platform: linux/riscv64
+      runs-on: ubuntu-26.04-arm
       push: true
     secrets: inherit
 
@@ -48,7 +57,7 @@ jobs:
     with:
       distro: alpine
       platform: linux/amd64
-      runs-on: ubuntu-24.04
+      runs-on: ubuntu-26.04
       push: true
     secrets: inherit
 
@@ -57,7 +66,7 @@ jobs:
     with:
       distro: alpine
       platform: linux/arm64
-      runs-on: ubuntu-24.04-arm
+      runs-on: ubuntu-26.04-arm
       push: true
     secrets: inherit
 
@@ -66,7 +75,16 @@ jobs:
     with:
       distro: alpine
       platform: linux/arm/v7
-      runs-on: ubuntu-24.04-arm
+      runs-on: ubuntu-26.04-arm
+      push: true
+    secrets: inherit
+
+  docker-alpine-riscv64:
+    uses: ./.github/workflows/docker_build.yml
+    with:
+      distro: alpine
+      platform: linux/riscv64
+      runs-on: ubuntu-26.04-arm
       push: true
     secrets: inherit
 
@@ -76,18 +94,18 @@ jobs:
       - docker-debian-amd64
       - docker-debian-arm64
       - docker-debian-armv7
+      - docker-debian-riscv64
       # Alpine
       - docker-alpine-amd64
       - docker-alpine-arm64
       - docker-alpine-armv7
-    runs-on: ubuntu-24.04
+      - docker-alpine-riscv64
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           submodules: recursive
-          ref: ${{github.event.pull_request.head.ref}}
-          repository: ${{github.event.pull_request.head.repo.full_name}}
 
       - name: Get release version string
         run: |
@@ -164,6 +182,7 @@ jobs:
             meshtastic/meshtasticd@${{ needs.docker-debian-amd64.outputs.digest }}
             meshtastic/meshtasticd@${{ needs.docker-debian-arm64.outputs.digest }}
             meshtastic/meshtasticd@${{ needs.docker-debian-armv7.outputs.digest }}
+            meshtastic/meshtasticd@${{ needs.docker-debian-riscv64.outputs.digest }}
 
       - name: Docker meta (Alpine)
         id: meta_alpine
@@ -184,3 +203,4 @@ jobs:
             meshtastic/meshtasticd@${{ needs.docker-alpine-amd64.outputs.digest }}
             meshtastic/meshtasticd@${{ needs.docker-alpine-arm64.outputs.digest }}
             meshtastic/meshtasticd@${{ needs.docker-alpine-armv7.outputs.digest }}
+            meshtastic/meshtasticd@${{ needs.docker-alpine-riscv64.outputs.digest }}

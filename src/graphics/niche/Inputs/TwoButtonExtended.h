@@ -45,15 +45,14 @@ class TwoButtonExtended : protected concurrency::OSThread
     void stop();                             // Stop handling button input (disconnect ISRs for sleep)
     void setWiring(uint8_t whichButton, uint8_t pin, bool internalPullup = false);
     void setJoystickWiring(uint8_t uPin, uint8_t dPin, uint8_t lPin, uint8_t rPin, bool internalPullup = false);
+    void setTwoWayRockerWiring(uint8_t leftPin, uint8_t rightPin, bool internalPullup = false);
     void setTiming(uint8_t whichButton, uint32_t debounceMs, uint32_t longpressMs);
     void setJoystickDebounce(uint32_t debounceMs);
     void setHandlerDown(uint8_t whichButton, Callback onDown);
-    void setHandlerUp(uint8_t whichButton, Callback onUp);
     void setHandlerShortPress(uint8_t whichButton, Callback onShortPress);
     void setHandlerLongPress(uint8_t whichButton, Callback onLongPress);
-    void setJoystickDownHandlers(Callback uDown, Callback dDown, Callback ldown, Callback rDown);
-    void setJoystickUpHandlers(Callback uUp, Callback dUp, Callback lUp, Callback rUp);
     void setJoystickPressHandlers(Callback uPress, Callback dPress, Callback lPress, Callback rPress);
+    void setTwoWayRockerPressHandlers(Callback lPress, Callback rPress);
 
     // Disconnect and reconnect interrupts for light sleep
 #ifdef ARCH_ESP32
@@ -83,7 +82,7 @@ class TwoButtonExtended : protected concurrency::OSThread
         volatile uint32_t irqAtMillis;      // millis() when button went down
 
         // Per-button event callbacks
-        static void noop(){};
+        static void noop() {};
         std::function<void()> onDown = noop;
         std::function<void()> onUp = noop;
         std::function<void()> onPress = noop;

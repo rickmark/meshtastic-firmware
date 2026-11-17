@@ -17,13 +17,18 @@ class BMX160Sensor : public MotionSensor
   private:
     RAK_BMX160 sensor;
     bool showingScreen = false;
+    static constexpr const char *compassCalibrationFileName = "/prefs/compass_bmx160.dat";
     float highestX = 0, lowestX = 0, highestY = 0, lowestY = 0, highestZ = 0, lowestZ = 0;
 
   public:
     explicit BMX160Sensor(ScanI2C::FoundDevice foundDevice);
     virtual bool init() override;
     virtual int32_t runOnce() override;
+#ifdef MESHTASTIC_INCLUDE_INKHUD
+    StepSource stepSource() const override { return StepSource::Software; }
+#endif
     virtual void calibrate(uint16_t forSeconds) override;
+    virtual bool providesHeading() const override { return true; }
 };
 
 #else
