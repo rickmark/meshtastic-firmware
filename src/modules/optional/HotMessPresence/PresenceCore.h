@@ -147,8 +147,8 @@ bool validateParams(const Params &p);
 static const uint8_t FRAME_VERSION = 1;
 enum FrameKind : uint8_t { KIND_STATUS = 0x0, KIND_CHAIN = 0x1, KIND_HMAC = 0x2, KIND_TOTP = 0x3 };
 static const size_t FRAME_HEADER_LEN = 11;
-static const size_t ADV_MFR_PAYLOAD_MAX = 24;      // 31 - flags(3) - AD header(2) - company id(2)
-static const size_t SCANRSP_MFR_PAYLOAD_MAX = 27;  // 31 - AD header(2) - company id(2)
+static const size_t ADV_MFR_PAYLOAD_MAX = 24;     // 31 - flags(3) - AD header(2) - company id(2)
+static const size_t SCANRSP_MFR_PAYLOAD_MAX = 27; // 31 - AD header(2) - company id(2)
 static const size_t FRAME_MAX = ADV_MFR_PAYLOAD_MAX + SCANRSP_MFR_PAYLOAD_MAX;
 
 size_t encodePresenceFrame(uint8_t *out, uint8_t kind, uint32_t beaconId, uint32_t epochId, uint32_t position,
@@ -170,8 +170,7 @@ class HashChain
     HashChain() {}
     ~HashChain();
     // Starts (re)generation from a seed. The caller then pumps generate() until it returns true.
-    bool begin(const uint8_t seed[32], uint32_t chainLength, uint32_t valueLen, uint32_t checkpointInterval,
-               uint32_t ramMax);
+    bool begin(const uint8_t seed[32], uint32_t chainLength, uint32_t valueLen, uint32_t checkpointInterval, uint32_t ramMax);
     bool generate(uint32_t maxSteps); // true once complete
     bool ready() const { return state == READY; }
     bool generating() const { return state == GENERATING; }

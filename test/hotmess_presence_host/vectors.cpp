@@ -81,7 +81,7 @@ int main()
     CHECK(!applyParamTlv(q, (const uint8_t *)"\x01\x02\x00\x01", 4)); // tick 1 ms fails validation
     CHECK(applyParamTlv(q, tlv, tl) && memcmp(&p, &q, sizeof(p)) == 0);
     CHECK(!applyParamTlv(q, (const uint8_t *)"\x63\x01\x00", 3)); // unknown id
-    const uint8_t neg[] = {P_TX_POWER_DBM, 1, 0xF8};                // -8 dBm in one byte
+    const uint8_t neg[] = {P_TX_POWER_DBM, 1, 0xF8};              // -8 dBm in one byte
     CHECK(applyParamTlv(q, neg, sizeof(neg)) && q.txPowerDbm == -8);
     printf("  \"default_params_tlv\": \"%s\",\n", hex(tlv, tl).c_str());
 

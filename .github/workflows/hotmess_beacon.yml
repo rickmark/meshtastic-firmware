@@ -3,13 +3,13 @@ name: Hot Mess beacon (T-Echo)
 on:
   push:
     branches:
-      - "claude/**"
-      - "hotmess/**"
+      - claude/**
+      - hotmess/**
   pull_request:
     paths:
-      - "src/modules/optional/HotMessPresence/**"
-      - "test/hotmess_presence_host/**"
-      - ".github/workflows/hotmess_beacon.yml"
+      - src/modules/optional/HotMessPresence/**
+      - test/hotmess_presence_host/**
+      - .github/workflows/hotmess_beacon.yml
   workflow_dispatch:
 
 permissions: read-all

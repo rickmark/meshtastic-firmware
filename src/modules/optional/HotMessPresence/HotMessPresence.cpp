@@ -8,6 +8,7 @@
 #if defined(ARCH_NRF52) && !defined(ARCH_NRF54L)
 #include "FSCommon.h"
 #include "GPSStatus.h"
+#include "HardwareRNG.h"
 #include "MeshService.h"
 #include "NodeDB.h"
 #include "PowerStatus.h"
@@ -16,9 +17,9 @@
 #include "SPILock.h"
 #include "SafeFile.h"
 #include "SinglePortModule.h"
+#include "UptimeClock.h"
 #include "concurrency/OSThread.h"
 #include "main.h"
-#include "HardwareRNG.h"
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -86,7 +87,8 @@ class HotMessPresenceModule : public SinglePortModule, private concurrency::OSTh
 {
   public:
     HotMessPresenceModule()
-        : SinglePortModule("hotmess-presence", (meshtastic_PortNum)HOTMESS_PRESENCE_PORTNUM), concurrency::OSThread("HotMessPresence")
+        : SinglePortModule("hotmess-presence", (meshtastic_PortNum)HOTMESS_PRESENCE_PORTNUM),
+          concurrency::OSThread("HotMessPresence")
     {
         computeFirmwareIdentity();
         if (!load())
@@ -95,6 +97,7 @@ class HotMessPresenceModule : public SinglePortModule, private concurrency::OSTh
             chain.begin(st.seed, st.params.chainLength, st.params.chainValueLen, st.params.checkpointInterval,
                         st.params.checkpointRamMax);
         resumeTick = st.reservedTick;
+        // unset-sentinel-ok: lastMillis is only a delta base for monoMs, never read as armed/unarmed
         lastMillis = millis();
         LOG_INFO("HotMess presence: provisioned=%d beaconMode=%d epoch=%u", st.provisioned, st.beaconMode, st.epochId);
     }
@@ -218,6 +221,7 @@ class HotMessPresenceModule : public SinglePortModule, private concurrency::OSTh
     {
         uint32_t now = millis();
         monoMs += (uint32_t)(now - lastMillis);
+        // unset-sentinel-ok: lastMillis is only a delta base for monoMs, never read as armed/unarmed
         lastMillis = now;
     }
 
@@ -543,7 +547,7 @@ class HotMessPresenceModule : public SinglePortModule, private concurrency::OSTh
         if (st.beaconMode && config.bluetooth.enabled) {
             config.bluetooth.enabled = false;
             nodeDB->saveToDisk(SEGMENT_CONFIG);
-            rebootAtMsec = millis() + 5000;
+            rebootAtMsec = Time::timerEndsAtMillis(5000);
         }
         memcpy(body, st.devicePub, 32);
         putU32(body + 32, nodeDB->getNodeNum());

@@ -70,7 +70,8 @@ bool PresenceAdvertiser::show(Mode mode, const Params &p, const uint8_t addr[6],
             memcpy(md + 2, frame + first, frameLen - first);
             srLen = putAd(sr, 0, BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, md, 2 + frameLen - first);
         }
-        type = srLen ? BLE_GAP_ADV_TYPE_NONCONNECTABLE_SCANNABLE_UNDIRECTED : BLE_GAP_ADV_TYPE_NONCONNECTABLE_NONSCANNABLE_UNDIRECTED;
+        type = srLen ? BLE_GAP_ADV_TYPE_NONCONNECTABLE_SCANNABLE_UNDIRECTED
+                     : BLE_GAP_ADV_TYPE_NONCONNECTABLE_NONSCANNABLE_UNDIRECTED;
     } else if (mode == MODE_IBEACON) {
         gapAddr.addr_type = BLE_GAP_ADDR_TYPE_RANDOM_STATIC;
         uint8_t md[25] = {0x4C, 0x00, 0x02, 0x15};

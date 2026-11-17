@@ -8,9 +8,18 @@
 namespace hmp
 {
 static_assert(sizeof(SHA256_CTX) <= sizeof(Sha256Ctx::opaque), "ctx");
-void sha256Begin(Sha256Ctx &c) { SHA256_Init(reinterpret_cast<SHA256_CTX *>(c.opaque)); }
-void sha256Update(Sha256Ctx &c, const void *d, size_t n) { SHA256_Update(reinterpret_cast<SHA256_CTX *>(c.opaque), d, n); }
-void sha256Final(Sha256Ctx &c, uint8_t out[32]) { SHA256_Final(out, reinterpret_cast<SHA256_CTX *>(c.opaque)); }
+void sha256Begin(Sha256Ctx &c)
+{
+    SHA256_Init(reinterpret_cast<SHA256_CTX *>(c.opaque));
+}
+void sha256Update(Sha256Ctx &c, const void *d, size_t n)
+{
+    SHA256_Update(reinterpret_cast<SHA256_CTX *>(c.opaque), d, n);
+}
+void sha256Final(Sha256Ctx &c, uint8_t out[32])
+{
+    SHA256_Final(out, reinterpret_cast<SHA256_CTX *>(c.opaque));
+}
 
 bool ed25519Verify(const uint8_t sig[64], const uint8_t pub[32], const uint8_t *msg, size_t len)
 {

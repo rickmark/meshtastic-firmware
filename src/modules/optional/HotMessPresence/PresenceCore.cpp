@@ -410,8 +410,8 @@ uint32_t totpCode(const uint8_t *key, size_t keyLen, uint64_t t, uint32_t digits
     uint8_t mac[32];
     hmacSha256(key, keyLen, msg, 8, mac);
     uint8_t off = mac[31] & 0x0F;
-    uint32_t bin = ((uint32_t)(mac[off] & 0x7F) << 24) | ((uint32_t)mac[off + 1] << 16) | ((uint32_t)mac[off + 2] << 8) |
-                   mac[off + 3];
+    uint32_t bin =
+        ((uint32_t)(mac[off] & 0x7F) << 24) | ((uint32_t)mac[off + 1] << 16) | ((uint32_t)mac[off + 2] << 8) | mac[off + 3];
     uint32_t mod = 1;
     for (uint32_t i = 0; i < digits; i++)
         mod *= 10;
