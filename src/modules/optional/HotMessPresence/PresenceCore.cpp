@@ -347,9 +347,9 @@ bool HashChain::begin(const uint8_t seed[32], uint32_t chainLength, uint32_t val
     checkpoints = (uint8_t *)malloc((size_t)bytes);
     if (!checkpoints)
         return false;
-    n = chainLength;
-    len = valueLen;
-    k = checkpointInterval;
+    this->n = chainLength;
+    this->len = valueLen;
+    this->k = checkpointInterval;
     chainSeedToX0(seed, len, cursor);
     memcpy(checkpoints, cursor, len);
     nextIndex = 1;

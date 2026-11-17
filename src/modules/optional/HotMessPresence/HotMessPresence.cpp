@@ -59,7 +59,7 @@ struct PersistedState {
     uint8_t provisioned, beaconMode, frameMask, homeSet, moved, adminPki, adminChannel, epochSet;
     uint8_t devicePriv[32], devicePub[32], adminPub[32];
     uint8_t hmacKey[32], totpKey[32];
-    uint8_t hmacKeyLen, totpKeyLen, seedSet, pad;
+    uint8_t hmacKeyLen, totpKeyLen, seedSet;
     uint8_t seed[32];
     uint64_t lastAdminCounter;
     uint32_t epochId;
@@ -192,12 +192,15 @@ class HotMessPresenceModule : public SinglePortModule, private concurrency::OSTh
         fwVersion[2] = (uint8_t)c;
         // SHA-256 over the image exactly as firmware.bin lays it out: code from the start of the
         // application region to __etext, followed by the initialised-data load image.
-        const uint8_t *start = reinterpret_cast<const uint8_t *>(&__flash_arduino_start);
-        const uint8_t *etext = reinterpret_cast<const uint8_t *>(&__etext);
-        size_t dataLen = reinterpret_cast<const uint8_t *>(&__data_end__) - reinterpret_cast<const uint8_t *>(&__data_start__);
+        // Linker symbols are separate objects to the compiler, so measure them as addresses.
+        const uintptr_t startAddr = reinterpret_cast<uintptr_t>(&__flash_arduino_start);
+        const uintptr_t etextAddr = reinterpret_cast<uintptr_t>(&__etext);
+        const size_t dataLen = reinterpret_cast<uintptr_t>(&__data_end__) - reinterpret_cast<uintptr_t>(&__data_start__);
+        const uint8_t *start = reinterpret_cast<const uint8_t *>(startAddr);
+        const uint8_t *etext = reinterpret_cast<const uint8_t *>(etextAddr);
         Sha256Ctx ctx;
         sha256Begin(ctx);
-        sha256Update(ctx, start, etext - start);
+        sha256Update(ctx, start, etextAddr - startAddr);
         sha256Update(ctx, etext, dataLen);
         sha256Final(ctx, fwHash);
     }
@@ -500,9 +503,11 @@ class HotMessPresenceModule : public SinglePortModule, private concurrency::OSTh
                  (chain.ready() ? 8 : 0) | (clockValid ? 16 : 0) | (st.beaconMode ? 32 : 0);
         b[n++] = st.frameMask;
         b[n++] = (uint8_t)st.params.schemeMask;
-        const uint32_t *c = &st.counts.presenceFrames;
+        const PilotCounts &c = st.counts;
+        const uint32_t counts[6] = {c.presenceFrames,  c.statusFrames,  c.iBeaconFrames,
+                                    c.eddystoneFrames, c.adminAccepted, c.adminRejected};
         for (int i = 0; i < 6; i++, n += 4)
-            putU32(b + n, c[i]);
+            putU32(b + n, counts[i]);
     }
 
     uint8_t provision(const AdminCommand &c, uint8_t *body, size_t &bodyLen)

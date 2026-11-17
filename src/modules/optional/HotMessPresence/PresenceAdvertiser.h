@@ -26,8 +26,8 @@ class PresenceAdvertiser
   private:
     bool isOwned = false;
     uint8_t bufIndex = 0;
-    uint8_t advBuf[2][31];
-    uint8_t srBuf[2][31];
+    uint8_t advBuf[2][31] = {};
+    uint8_t srBuf[2][31] = {};
 };
 
 } // namespace hmp
