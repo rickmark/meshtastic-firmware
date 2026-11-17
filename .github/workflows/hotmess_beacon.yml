@@ -1,0 +1,67 @@
+name: Hot Mess beacon (T-Echo)
+
+on:
+  push:
+    branches:
+      - "claude/**"
+      - "hotmess/**"
+  pull_request:
+    paths:
+      - "src/modules/optional/HotMessPresence/**"
+      - "test/hotmess_presence_host/**"
+      - ".github/workflows/hotmess_beacon.yml"
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  host-vectors:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y libssl-dev
+      - name: Presence core self-checks and shared test vectors
+        run: make -C test/hotmess_presence_host
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hotmess-presence-vectors
+          path: test/hotmess_presence_host/vectors.json
+
+  t-echo:
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [stock, beacon]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -U platformio
+      - name: Drop the beacon module for the stock build
+        if: matrix.flavor == 'stock'
+        run: rm -rf src/modules/optional
+      - name: Build
+        run: pio run -e t-echo
+      - name: Firmware hash (matches the status frame's fw hash prefix)
+        run: |
+          cd .pio/build/t-echo
+          ls -l
+          ~/.platformio/packages/toolchain-gccarmnoneeabi/bin/arm-none-eabi-objcopy -O binary firmware.elf firmware.bin
+          sha256sum firmware.bin | tee firmware.bin.sha256
+          echo "### t-echo ${{ matrix.flavor }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat firmware.bin.sha256 >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: t-echo-${{ matrix.flavor }}
+          path: |
+            .pio/build/t-echo/firmware*.uf2
+            .pio/build/t-echo/firmware*.hex
+            .pio/build/t-echo/firmware*.zip
+            .pio/build/t-echo/firmware.bin
+            .pio/build/t-echo/firmware.bin.sha256
