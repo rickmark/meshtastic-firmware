@@ -6,6 +6,7 @@
 #include "CannedMessageModule.h"
 #include "Channels.h"
 #include "FSCommon.h"
+#include "MeshRadio.h"
 #include "MeshService.h"
 #include "MessageStore.h"
 #include "NodeDB.h"
@@ -13,10 +14,12 @@
 #include "buzz.h"
 #include "detect/ScanI2C.h"
 #include "gps/RTC.h"
+#include "graphics/EmoteRenderer.h"
 #include "graphics/Screen.h"
 #include "graphics/SharedUIDisplay.h"
 #include "graphics/draw/MessageRenderer.h"
 #include "graphics/draw/NotificationRenderer.h"
+#include "graphics/draw/UIRenderer.h"
 #include "graphics/emotes.h"
 #include "graphics/images.h"
 #include "input/SerialKeyboard.h"
@@ -31,7 +34,9 @@ extern MessageStore messageStore;
 #if !MESHTASTIC_EXCLUDE_GPS
 #include "GPS.h"
 #endif
-#if defined(USE_EINK) && defined(USE_EINK_DYNAMICDISPLAY)
+#if defined(MESHTASTIC_INCLUDE_NICHE_GRAPHICS) && !defined(MESHTASTIC_INCLUDE_INKHUD)
+#include "graphics/BaseUIEInkDisplay.h" // NicheGraphics-backed BaseUI e-ink adapter
+#elif defined(USE_EINK) && defined(USE_EINK_DYNAMICDISPLAY)
 #include "graphics/EInkDynamicDisplay.h" // To select between full and fast refresh on E-Ink displays
 #endif
 
@@ -44,71 +49,6 @@ extern MessageStore messageStore;
 
 // Remove Canned message screen if no action is taken for some milliseconds
 #define INACTIVATE_AFTER_MS 20000
-
-// Tokenize a message string into emote/text segments
-static std::vector<std::pair<bool, String>> tokenizeMessageWithEmotes(const char *msg)
-{
-    std::vector<std::pair<bool, String>> tokens;
-    int msgLen = strlen(msg);
-    int pos = 0;
-    while (pos < msgLen) {
-        const graphics::Emote *foundEmote = nullptr;
-        int foundLen = 0;
-        for (int j = 0; j < graphics::numEmotes; j++) {
-            const char *label = graphics::emotes[j].label;
-            int labelLen = strlen(label);
-            if (labelLen == 0)
-                continue;
-            if (strncmp(msg + pos, label, labelLen) == 0) {
-                if (!foundEmote || labelLen > foundLen) {
-                    foundEmote = &graphics::emotes[j];
-                    foundLen = labelLen;
-                }
-            }
-        }
-        if (foundEmote) {
-            tokens.emplace_back(true, String(foundEmote->label));
-            pos += foundLen;
-        } else {
-            // Find next emote
-            int nextEmote = msgLen;
-            for (int j = 0; j < graphics::numEmotes; j++) {
-                const char *label = graphics::emotes[j].label;
-                if (!label || !*label)
-                    continue;
-                const char *found = strstr(msg + pos, label);
-                if (found && (found - msg) < nextEmote) {
-                    nextEmote = found - msg;
-                }
-            }
-            int textLen = (nextEmote > pos) ? (nextEmote - pos) : (msgLen - pos);
-            if (textLen > 0) {
-                tokens.emplace_back(false, String(msg + pos).substring(0, textLen));
-                pos += textLen;
-            } else {
-                break;
-            }
-        }
-    }
-    return tokens;
-}
-
-// Render a single emote token centered vertically on a row
-static void renderEmote(OLEDDisplay *display, int &nextX, int lineY, int rowHeight, const String &label)
-{
-    const graphics::Emote *emote = nullptr;
-    for (int j = 0; j < graphics::numEmotes; j++) {
-        if (label == graphics::emotes[j].label) {
-            emote = &graphics::emotes[j];
-            break;
-        }
-    }
-    if (emote) {
-        int emoteYOffset = (rowHeight - emote->height) / 2; // vertically center the emote
-        display->drawXbm(nextX, lineY + emoteYOffset, emote->width, emote->height, emote->bitmap);
-        nextX += emote->width + 2; // spacing between tokens
-    }
-}
 
 namespace graphics
 {
@@ -131,7 +71,11 @@ CannedMessageModule::CannedMessageModule()
 {
     this->loadProtoForModule();
     if ((this->splitConfiguredMessages() <= 0) && (cardkb_found.address == 0x00) && !INPUTBROKER_MATRIX_TYPE) {
-        LOG_INFO("CannedMessageModule: No messages are configured. Module is disabled");
+        LOG_INFO("CannedMessage: none configured, disabled");
+        this->updateState(CANNED_MESSAGE_RUN_STATE_DISABLED);
+        disable();
+    } else if (!inputBroker) {
+        LOG_INFO("CannedMessage: no InputBroker, disabled");
         this->updateState(CANNED_MESSAGE_RUN_STATE_DISABLED);
         disable();
     } else {
@@ -144,9 +88,12 @@ CannedMessageModule::CannedMessageModule()
 void CannedMessageModule::LaunchWithDestination(NodeNum newDest, uint8_t newChannel)
 {
     // Do NOT override explicit broadcast replies
-    // Only reuse lastDest in LaunchRepeatDestination()
 
-    dest = newDest;
+    if (newDest == 0) {
+        dest = NODENUM_BROADCAST;
+    } else {
+        dest = newDest;
+    }
     channel = newChannel;
 
     lastDest = dest;
@@ -169,42 +116,104 @@ void CannedMessageModule::LaunchWithDestination(NodeNum newDest, uint8_t newChan
     e.action = UIFrameEvent::Action::REGENERATE_FRAMESET;
     notifyObservers(&e);
 
-    LOG_DEBUG("[CannedMessage] LaunchWithDestination dest=0x%08x ch=%d", dest, channel);
+    LOG_TRACE("[CannedMessage] LaunchWithDestination dest=0x%08x ch=%d", dest, channel);
 }
 
-void CannedMessageModule::LaunchRepeatDestination()
+// Compose through the on-screen keyboard used by devices without a physical one
+// (rotary encoder, trackball, joystick). Returns false when no such keyboard exists,
+// so callers can fall back to the plain freetext screen.
+bool CannedMessageModule::showOnScreenKeyboard()
 {
-    if (!lastDestSet) {
-        LaunchWithDestination(NODENUM_BROADCAST, 0);
+    if (!osk_found || !screen)
+        return false;
+
+    char headerBuffer[64];
+    if (this->dest == NODENUM_BROADCAST) {
+        snprintf(headerBuffer, sizeof(headerBuffer), "To: #%s", channels.getName(this->channel));
     } else {
-        LaunchWithDestination(lastDest, lastChannel);
+        snprintf(headerBuffer, sizeof(headerBuffer), "To: @%s", getNodeName(this->dest));
     }
+    screen->showTextInput(headerBuffer, "", 300000, [this](const std::string &text) {
+        if (!text.empty()) {
+            this->freetext = text.c_str();
+            this->payload = CANNED_MESSAGE_RUN_STATE_FREETEXT;
+            updateState(CANNED_MESSAGE_RUN_STATE_SENDING_ACTIVE);
+            currentMessageIndex = -1;
+
+            UIFrameEvent e;
+            e.action = UIFrameEvent::Action::REGENERATE_FRAMESET;
+            this->notifyObservers(&e);
+            screen->forceDisplay();
+
+            setIntervalFromNow(500);
+            return;
+        } else {
+            // Don't delete virtual keyboard immediately - it might still be executing
+            // Instead, just clear the callback and reset banner to stop input processing
+            graphics::NotificationRenderer::textInputCallback = nullptr;
+            graphics::NotificationRenderer::resetBanner();
+
+            // Return to inactive state
+            this->updateState(CANNED_MESSAGE_RUN_STATE_INACTIVE);
+            this->currentMessageIndex = -1;
+            this->freetext = "";
+            this->cursor = 0;
+
+            // Force display update to show normal screen
+            UIFrameEvent e;
+            e.action = UIFrameEvent::Action::REGENERATE_FRAMESET;
+            this->notifyObservers(&e);
+            screen->forceDisplay();
+
+            // Schedule cleanup for next loop iteration to ensure safe deletion
+            setIntervalFromNow(50);
+            return;
+        }
+    });
+
+    return true;
 }
 
 void CannedMessageModule::LaunchFreetextWithDestination(NodeNum newDest, uint8_t newChannel)
 {
     // Do NOT override explicit broadcast replies
-    // Only reuse lastDest in LaunchRepeatDestination()
 
-    dest = newDest;
+    if (newDest == 0) {
+        dest = NODENUM_BROADCAST;
+    } else {
+        dest = newDest;
+    }
     channel = newChannel;
 
     lastDest = dest;
     lastChannel = channel;
     lastDestSet = true;
 
+#if !defined(USE_VIRTUAL_KEYBOARD)
+    // The freetext screen needs real key input, so devices without a physical keyboard
+    // compose on the on-screen keyboard instead. Open it from runOnce() rather than here:
+    // menus call us from a banner callback, and the banner is torn down as soon as that
+    // callback returns, which would take the keyboard down with it.
+    if (!kb_found && osk_found && screen) {
+        pendingOskLaunch = true;
+        setIntervalFromNow(0);
+        LOG_TRACE("[CannedMessage] LaunchFreetextWithDestination (OSK) dest=0x%08x ch=%d", dest, channel);
+        return;
+    }
+#endif
+
     updateState(CANNED_MESSAGE_RUN_STATE_FREETEXT, true);
     UIFrameEvent e;
     e.action = UIFrameEvent::Action::REGENERATE_FRAMESET;
     notifyObservers(&e);
 
-    LOG_DEBUG("[CannedMessage] LaunchFreetextWithDestination dest=0x%08x ch=%d", dest, channel);
+    LOG_TRACE("[CannedMessage] LaunchFreetextWithDestination dest=0x%08x ch=%d", dest, channel);
 }
 
 static bool returnToCannedList = false;
 bool hasKeyForNode(const meshtastic_NodeInfoLite *node)
 {
-    return node && node->has_user && node->user.public_key.size > 0;
+    return nodeInfoLiteHasUser(node) && node->public_key.size > 0;
 }
 /**
  * @brief Items in array this->messages will be set to be pointing on the right
@@ -244,7 +253,7 @@ int CannedMessageModule::splitConfiguredMessages()
     while (i < upTo) {
         if (this->messageBuffer[i] == '|') {
             this->messageBuffer[i] = '\0'; // End previous message
-            if (tempCount >= CANNED_MESSAGE_MODULE_MESSAGE_MAX_COUNT)
+            if (tempCount >= CANNED_MESSAGE_MODULE_MESSAGE_MAX_COUNT - 1)
                 break;
             tempMessages[tempCount++] = (this->messageBuffer + i + 1);
         }
@@ -264,19 +273,23 @@ int CannedMessageModule::splitConfiguredMessages()
 }
 void CannedMessageModule::drawHeader(OLEDDisplay *display, int16_t x, int16_t y, char *buffer)
 {
-    if (graphics::currentResolution == graphics::ScreenResolution::High) {
-        if (this->dest == NODENUM_BROADCAST) {
-            display->drawStringf(x, y, buffer, "To: #%s", channels.getName(this->channel));
-        } else {
-            display->drawStringf(x, y, buffer, "To: @%s", getNodeName(this->dest));
-        }
+    (void)buffer;
+
+    char header[96];
+    if (this->dest == NODENUM_BROADCAST) {
+        const char *channelName = channels.getName(this->channel);
+        snprintf(header, sizeof(header), "To: #%s", channelName ? channelName : "?");
     } else {
-        if (this->dest == NODENUM_BROADCAST) {
-            display->drawStringf(x, y, buffer, "To: #%.20s", channels.getName(this->channel));
-        } else {
-            display->drawStringf(x, y, buffer, "To: @%s", getNodeName(this->dest));
-        }
+        snprintf(header, sizeof(header), "To: @%s", getNodeName(this->dest));
     }
+
+    // First row of text: inset horizontally by the header L/R margin and pushed down by the header margin
+    const int headerX = x + BASEUI_HEADER_LR_MARGIN;
+    const int headerY = y + BASEUI_HEADER_MARGIN;
+    const int maxWidth = std::max(0, display->getWidth() - headerX - BASEUI_HEADER_LR_MARGIN);
+    char truncatedHeader[96];
+    graphics::UIRenderer::truncateStringWithEmotes(display, header, truncatedHeader, sizeof(truncatedHeader), maxWidth);
+    graphics::UIRenderer::drawStringWithEmotes(display, headerX, headerY, truncatedHeader, FONT_HEIGHT_SMALL, 1, false);
 }
 
 void CannedMessageModule::resetSearch()
@@ -324,10 +337,10 @@ void CannedMessageModule::updateDestinationSelectionList()
 
     for (size_t i = 0; i < numMeshNodes; ++i) {
         meshtastic_NodeInfoLite *node = nodeDB->getMeshNodeByIndex(i);
-        if (!node || node->num == myNodeNum || !node->has_user || node->user.public_key.size != 32)
+        if (!node || node->num == myNodeNum || !nodeInfoLiteHasUser(node) || node->public_key.size != 32)
             continue;
 
-        const String &nodeName = node->user.long_name;
+        const String &nodeName = node->long_name;
 
         if (searchQuery.length() == 0) {
             this->filteredNodes.push_back({node, sinceLastSeen(node)});
@@ -341,10 +354,6 @@ void CannedMessageModule::updateDestinationSelectionList()
             }
         }
     }
-
-    meshtastic_MeshPacket *p = allocDataPacket();
-    p->pki_encrypted = true;
-    p->channel = 0;
 
     // Populate active channels
     std::vector<String> seenChannels;
@@ -360,15 +369,95 @@ void CannedMessageModule::updateDestinationSelectionList()
     scrollIndex = 0; // Show first result at the top
     destIndex = 0;   // Highlight the first entry
     if (nodesChanged && runState == CANNED_MESSAGE_RUN_STATE_DESTINATION_SELECTION) {
-        LOG_INFO("Nodes changed, forcing UI refresh.");
+        LOG_INFO("Nodes changed, forcing UI refresh");
         screen->forceDisplay();
     }
 }
 
-// Returns true if character input is currently allowed (used for search/freetext states)
-bool CannedMessageModule::isCharInputAllowed() const
+static int getRowHeightForEmoteText(const char *text, int minimumHeight, int emoteSpacing = 2)
 {
-    return runState == CANNED_MESSAGE_RUN_STATE_FREETEXT || runState == CANNED_MESSAGE_RUN_STATE_DESTINATION_SELECTION;
+    // Grow the row only when an emote is taller than the font.
+    const auto metrics =
+        graphics::EmoteRenderer::analyzeLine(nullptr, text ? text : "", 0, graphics::emotes, graphics::numEmotes, emoteSpacing);
+    return std::max(minimumHeight, metrics.tallestHeight + 2);
+}
+
+static void drawCenteredEmoteText(OLEDDisplay *display, int x, int y, int rowHeight, const char *text, int emoteSpacing = 2)
+{
+    // Center mixed text and emotes inside the row height.
+    const auto metrics = graphics::EmoteRenderer::analyzeLine(nullptr, text ? text : "", FONT_HEIGHT_SMALL, graphics::emotes,
+                                                              graphics::numEmotes, emoteSpacing);
+    const int contentHeight = std::max(FONT_HEIGHT_SMALL, metrics.tallestHeight);
+    const int drawY = y + ((rowHeight - contentHeight) / 2);
+    graphics::EmoteRenderer::drawStringWithEmotes(display, x, drawY, text ? text : "", FONT_HEIGHT_SMALL, graphics::emotes,
+                                                  graphics::numEmotes, emoteSpacing, false);
+}
+
+static size_t firstWrappedTokenLen(const char *text)
+{
+    // Fall back to one full emote or one UTF-8 glyph when width is tiny.
+    if (!text || !*text)
+        return 0;
+
+    const size_t textLen = strlen(text);
+    size_t matchLen = 0;
+    if (graphics::EmoteRenderer::findEmoteAt(text, textLen, 0, matchLen, graphics::emotes, graphics::numEmotes))
+        return matchLen;
+
+    return graphics::EmoteRenderer::utf8CharLen(static_cast<uint8_t>(text[0]));
+}
+
+static void drawWrappedEmoteText(OLEDDisplay *display, int x, int y, const char *text, int maxWidth, int minimumRowHeight,
+                                 int emoteSpacing = 2)
+{
+    // Wrap onto multiple rows without splitting emotes.
+    if (!display || !text || maxWidth <= 0)
+        return;
+
+    constexpr size_t kLineBufferSize = 256;
+    char lineBuffer[kLineBufferSize];
+    const size_t textLen = strlen(text);
+    size_t offset = 0;
+    int yCursor = y;
+
+    while (offset < textLen) {
+        size_t copied = graphics::EmoteRenderer::truncateToWidth(display, text + offset, lineBuffer, sizeof(lineBuffer), maxWidth,
+                                                                 "", graphics::emotes, graphics::numEmotes, emoteSpacing);
+        size_t consumed = copied;
+
+        if (copied == 0) {
+            consumed = firstWrappedTokenLen(text + offset);
+            if (consumed == 0)
+                break;
+
+            const size_t fallbackLen = std::min(consumed, sizeof(lineBuffer) - 1);
+            memcpy(lineBuffer, text + offset, fallbackLen);
+            lineBuffer[fallbackLen] = '\0';
+            consumed = fallbackLen;
+        } else if (text[offset + copied] != '\0') {
+            // Prefer wrapping at the last space when a full line does not fit.
+            size_t lastSpace = copied;
+            while (lastSpace > 0 && lineBuffer[lastSpace - 1] != ' ')
+                --lastSpace;
+
+            if (lastSpace > 0) {
+                consumed = lastSpace;
+                while (consumed > 0 && lineBuffer[consumed - 1] == ' ')
+                    --consumed;
+                lineBuffer[consumed] = '\0';
+            }
+        }
+
+        if (lineBuffer[0]) {
+            const int rowHeight = getRowHeightForEmoteText(lineBuffer, minimumRowHeight, emoteSpacing);
+            drawCenteredEmoteText(display, x, yCursor, rowHeight, lineBuffer, emoteSpacing);
+            yCursor += rowHeight;
+        }
+
+        offset += std::max<size_t>(consumed, 1);
+        while (offset < textLen && text[offset] == ' ')
+            ++offset;
+    }
 }
 /**
  * Main input event dispatcher for CannedMessageModule.
@@ -427,6 +516,9 @@ int CannedMessageModule::handleInputEvent(const InputEvent *event)
             LaunchWithDestination(NODENUM_BROADCAST);
             return 1;
         }
+        // Space is reserved for advancing frames (handled by Screen), so it must not open the composer
+        if (event->kbchar == ' ')
+            return 0;
         // Printable char (ASCII) opens free text compose
         if (event->kbchar >= 32 && event->kbchar <= 126) {
             updateState(CANNED_MESSAGE_RUN_STATE_FREETEXT, true);
@@ -456,12 +548,15 @@ int CannedMessageModule::handleInputEvent(const InputEvent *event)
 void CannedMessageModule::updateState(cannedMessageModuleRunState newState, bool shouldRequestFocus)
 {
     runState = newState;
-    if (runState == CANNED_MESSAGE_RUN_STATE_FREETEXT) {
-        inputBroker->menuMode =
-            false; // Allow any key input to be sent to the message composer instead of being interpreted as menu navigation
-    } else {
-        inputBroker->menuMode = true; // Re-enable menu navigation for destination selection
+    if (inputBroker) {
+        if (runState == CANNED_MESSAGE_RUN_STATE_FREETEXT) {
+            inputBroker->menuMode =
+                false; // Allow any key input to be sent to the message composer instead of being interpreted as menu navigation
+        } else {
+            inputBroker->menuMode = true; // Re-enable menu navigation for destination selection
+        }
     }
+
     if (shouldRequestFocus) {
         requestFocus();
     }
@@ -491,18 +586,16 @@ bool CannedMessageModule::handleTabSwitch(const InputEvent *event)
     if (event->kbchar != 0x09)
         return false;
 
-    updateState((runState == CANNED_MESSAGE_RUN_STATE_DESTINATION_SELECTION) ? CANNED_MESSAGE_RUN_STATE_FREETEXT
-                                                                             : CANNED_MESSAGE_RUN_STATE_DESTINATION_SELECTION);
+    const cannedMessageModuleRunState targetState = (runState == CANNED_MESSAGE_RUN_STATE_DESTINATION_SELECTION)
+                                                        ? CANNED_MESSAGE_RUN_STATE_FREETEXT
+                                                        : CANNED_MESSAGE_RUN_STATE_DESTINATION_SELECTION;
 
     destIndex = 0;
     scrollIndex = 0;
-    // RESTORE THIS!
-    if (runState == CANNED_MESSAGE_RUN_STATE_DESTINATION_SELECTION)
+    if (targetState == CANNED_MESSAGE_RUN_STATE_DESTINATION_SELECTION)
         updateDestinationSelectionList();
 
-    updateState((runState == CANNED_MESSAGE_RUN_STATE_DESTINATION_SELECTION) ? CANNED_MESSAGE_RUN_STATE_FREETEXT
-                                                                             : CANNED_MESSAGE_RUN_STATE_DESTINATION_SELECTION,
-                true);
+    updateState(targetState, true);
 
     UIFrameEvent e;
     e.action = UIFrameEvent::Action::REGENERATE_FRAMESET;
@@ -699,65 +792,18 @@ bool CannedMessageModule::handleMessageSelectorInput(const InputEvent *event, bo
         }
 
         // [Free Text] triggers the free text input (virtual keyboard)
-#if defined(USE_VIRTUAL_KEYBOARD)
         if (strcmp(current, "[-- Free Text --]") == 0) {
+#if defined(USE_VIRTUAL_KEYBOARD)
             updateState(CANNED_MESSAGE_RUN_STATE_FREETEXT, true);
             UIFrameEvent e;
             e.action = UIFrameEvent::Action::REGENERATE_FRAMESET;
             notifyObservers(&e);
             return true;
-        }
 #else
-        if (strcmp(current, "[-- Free Text --]") == 0) {
-            if (osk_found && screen) {
-                char headerBuffer[64];
-                if (this->dest == NODENUM_BROADCAST) {
-                    snprintf(headerBuffer, sizeof(headerBuffer), "To: #%s", channels.getName(this->channel));
-                } else {
-                    snprintf(headerBuffer, sizeof(headerBuffer), "To: @%s", getNodeName(this->dest));
-                }
-                screen->showTextInput(headerBuffer, "", 300000, [this](const std::string &text) {
-                    if (!text.empty()) {
-                        this->freetext = text.c_str();
-                        this->payload = CANNED_MESSAGE_RUN_STATE_FREETEXT;
-                        updateState(CANNED_MESSAGE_RUN_STATE_SENDING_ACTIVE);
-                        currentMessageIndex = -1;
-
-                        UIFrameEvent e;
-                        e.action = UIFrameEvent::Action::REGENERATE_FRAMESET;
-                        this->notifyObservers(&e);
-                        screen->forceDisplay();
-
-                        setIntervalFromNow(500);
-                        return;
-                    } else {
-                        // Don't delete virtual keyboard immediately - it might still be executing
-                        // Instead, just clear the callback and reset banner to stop input processing
-                        graphics::NotificationRenderer::textInputCallback = nullptr;
-                        graphics::NotificationRenderer::resetBanner();
-
-                        // Return to inactive state
-                        this->updateState(CANNED_MESSAGE_RUN_STATE_INACTIVE);
-                        this->currentMessageIndex = -1;
-                        this->freetext = "";
-                        this->cursor = 0;
-
-                        // Force display update to show normal screen
-                        UIFrameEvent e;
-                        e.action = UIFrameEvent::Action::REGENERATE_FRAMESET;
-                        this->notifyObservers(&e);
-                        screen->forceDisplay();
-
-                        // Schedule cleanup for next loop iteration to ensure safe deletion
-                        setIntervalFromNow(50);
-                        return;
-                    }
-                });
-
+            if (showOnScreenKeyboard())
                 return true;
-            }
-        }
 #endif
+        }
 
         // Normal canned message selection
         if (runState == CANNED_MESSAGE_RUN_STATE_INACTIVE || runState == CANNED_MESSAGE_RUN_STATE_DISABLED) {
@@ -870,15 +916,17 @@ bool CannedMessageModule::handleFreeTextInput(const InputEvent *event)
     // All hardware keys fall through to here (CardKB, physical, etc.)
 
     if (event->kbchar == INPUT_BROKER_MSG_EMOTE_LIST) {
-        updateState(CANNED_MESSAGE_RUN_STATE_EMOTE_PICKER);
-        screen->forceDisplay();
+        if (graphics::numEmotes > 0) { // no picker on EXCLUDE_EMOJI builds (empty emotes[])
+            updateState(CANNED_MESSAGE_RUN_STATE_EMOTE_PICKER);
+            screen->forceDisplay();
+        }
         return true;
     }
     // Confirm select (Enter)
     bool isSelect = isSelectEvent(event);
     if (isSelect) {
-        LOG_DEBUG("[SELECT] handleFreeTextInput: runState=%d, dest=%u, channel=%d, freetext='%s'", (int)runState, dest, channel,
-                  freetext.c_str());
+        LOG_TRACE("[SELECT] handleFreeTextInput: runState=%d, dest=0x%08x, channel=%d, freetext='%s'", (int)runState, dest,
+                  channel, freetext.c_str());
         if (dest == 0)
             dest = NODENUM_BROADCAST;
         // Defensive: If channel isn't valid, pick the first available channel
@@ -955,6 +1003,11 @@ bool CannedMessageModule::handleFreeTextInput(const InputEvent *event)
 int CannedMessageModule::handleEmotePickerInput(const InputEvent *event)
 {
     int numEmotes = graphics::numEmotes;
+    if (numEmotes == 0) { // EXCLUDE_EMOJI: emotes[] is empty, any index would read out of bounds
+        updateState(CANNED_MESSAGE_RUN_STATE_FREETEXT, true);
+        screen->forceDisplay();
+        return 1;
+    }
 
     // Override isDown and isSelect ONLY for emote picker behavior
     bool isUp = isUpEvent(event);
@@ -984,12 +1037,15 @@ int CannedMessageModule::handleEmotePickerInput(const InputEvent *event)
     if (isSelect) {
         String label = graphics::emotes[emotePickerIndex].label;
         String emoteInsert = label; // Just the text label, e.g., ":thumbsup:"
-        if (cursor == freetext.length()) {
-            freetext += emoteInsert;
-        } else {
-            freetext = freetext.substring(0, cursor) + emoteInsert + freetext.substring(cursor);
+        // Whole or not at all: the editor's limit applies, and half a label would be garbage
+        if (freetext.length() + emoteInsert.length() <= maxFreetextBytes()) {
+            if (cursor == freetext.length()) {
+                freetext += emoteInsert;
+            } else {
+                freetext = freetext.substring(0, cursor) + emoteInsert + freetext.substring(cursor);
+            }
+            cursor += emoteInsert.length();
         }
-        cursor += emoteInsert.length();
         updateState(CANNED_MESSAGE_RUN_STATE_FREETEXT, true);
         screen->forceDisplay();
         return 1;
@@ -1012,6 +1068,8 @@ void CannedMessageModule::sendText(NodeNum dest, ChannelIndex channel, const cha
     lastDestSet = true;
 
     meshtastic_MeshPacket *p = allocDataPacket();
+    if (!p)
+        return;
     p->to = dest;
     p->channel = channel;
     p->want_ack = true;
@@ -1032,7 +1090,7 @@ void CannedMessageModule::sendText(NodeNum dest, ChannelIndex channel, const cha
     }
 
     NodeNum myNodeNum = nodeDB->getNodeNum();
-    if (node && node->num != myNodeNum && node->has_user && node->user.public_key.size == 32) {
+    if (node && node->num != myNodeNum && nodeInfoLiteHasUser(node) && node->public_key.size == 32) {
         p->pki_encrypted = true;
         p->channel = 0; // force PKI
     }
@@ -1040,11 +1098,14 @@ void CannedMessageModule::sendText(NodeNum dest, ChannelIndex channel, const cha
     // Track this packet’s request ID for matching ACKs
     this->lastRequestId = p->id;
 
-    // Copy payload
-    p->decoded.payload.size = strlen(message);
+    // Copy payload, never past its buffer
+    size_t copyLen = strlen(message);
+    if (copyLen > sizeof(p->decoded.payload.bytes))
+        copyLen = sizeof(p->decoded.payload.bytes);
+    p->decoded.payload.size = copyLen;
     memcpy(p->decoded.payload.bytes, message, p->decoded.payload.size);
 
-    if (moduleConfig.canned_message.send_bell && p->decoded.payload.size < meshtastic_Constants_DATA_PAYLOAD_LEN) {
+    if (moduleConfig.canned_message.send_bell && p->decoded.payload.size + 1 < meshtastic_Constants_DATA_PAYLOAD_LEN) {
         p->decoded.payload.bytes[p->decoded.payload.size++] = 7;
         p->decoded.payload.bytes[p->decoded.payload.size] = '\0';
     }
@@ -1087,10 +1148,10 @@ void CannedMessageModule::sendText(NodeNum dest, ChannelIndex channel, const cha
         if (config.device.role != meshtastic_Config_DeviceConfig_Role_ROUTER &&
             config.device.role != meshtastic_Config_DeviceConfig_Role_ROUTER_LATE &&
             config.device.role != meshtastic_Config_DeviceConfig_Role_CLIENT_BASE) {
-            LOG_INFO("Proactively adding %x as favorite node", dest);
+            LOG_INFO("Proactively adding 0x%08x as favorite node", dest);
             nodeDB->set_favorite(true, dest);
         } else {
-            LOG_DEBUG("Not favoriting node %x because role is router-like", dest);
+            LOG_DEBUG("Not favoriting node 0x%08x: router-like role", dest);
         }
     }
     sm.ackStatus = AckStatus::NONE;
@@ -1117,6 +1178,14 @@ void CannedMessageModule::sendText(NodeNum dest, ChannelIndex channel, const cha
 
 int32_t CannedMessageModule::runOnce()
 {
+    // A menu asked to compose freetext on the on-screen keyboard; the menu banner is gone
+    // by now, so it is safe to bring the keyboard up.
+    if (this->pendingOskLaunch) {
+        this->pendingOskLaunch = false;
+        if (showOnScreenKeyboard())
+            return INT32_MAX; // the text input callback drives everything from here
+    }
+
     if (this->runState == CANNED_MESSAGE_RUN_STATE_DESTINATION_SELECTION && needsUpdate) {
         updateDestinationSelectionList();
         needsUpdate = false;
@@ -1142,12 +1211,12 @@ int32_t CannedMessageModule::runOnce()
     if (this->runState == CANNED_MESSAGE_RUN_STATE_SENDING_ACTIVE && this->payload == CANNED_MESSAGE_RUN_STATE_FREETEXT) {
         // Virtual keyboard message sending case - text was not empty
         if (this->freetext.length() > 0) {
-            LOG_INFO("Processing delayed virtual keyboard send: '%s'", this->freetext.c_str());
+            LOG_INFO("Delayed vkbd send: '%s'", this->freetext.c_str());
             sendText(this->dest, this->channel, this->freetext.c_str(), true);
 
             // Clean up virtual keyboard after sending
             if (graphics::NotificationRenderer::virtualKeyboard) {
-                LOG_INFO("Cleaning up virtual keyboard after message send");
+                LOG_INFO("Vkbd cleanup after send");
                 graphics::OnScreenKeyboardModule::instance().stop(false);
                 graphics::NotificationRenderer::resetBanner();
             }
@@ -1157,7 +1226,7 @@ int32_t CannedMessageModule::runOnce()
             this->payload = 0;
         } else {
             // Empty message, just go inactive
-            LOG_INFO("Empty freetext detected in delayed processing, returning to inactive state");
+            LOG_INFO("Empty freetext, back to inactive");
             this->updateState(CANNED_MESSAGE_RUN_STATE_INACTIVE);
         }
 
@@ -1200,7 +1269,7 @@ int32_t CannedMessageModule::runOnce()
 
         // Clean up virtual keyboard if it exists during timeout
         if (graphics::NotificationRenderer::virtualKeyboard) {
-            LOG_INFO("Cleaning up virtual keyboard due to module timeout");
+            LOG_INFO("Vkbd cleanup on timeout");
             graphics::OnScreenKeyboardModule::instance().stop(false);
             graphics::NotificationRenderer::resetBanner();
         }
@@ -1209,7 +1278,7 @@ int32_t CannedMessageModule::runOnce()
     } else if (this->runState == CANNED_MESSAGE_RUN_STATE_ACTION_SELECT) {
         if (this->payload == 0) {
             // [Exit] button pressed - return to inactive state
-            LOG_INFO("Processing [Exit] action - returning to inactive state");
+            LOG_INFO("Exit action, back to inactive");
             this->updateState(CANNED_MESSAGE_RUN_STATE_INACTIVE);
         } else if (this->payload == CANNED_MESSAGE_RUN_STATE_FREETEXT) {
             if (this->freetext.length() > 0) {
@@ -1338,7 +1407,7 @@ int32_t CannedMessageModule::runOnce()
             case INPUT_BROKER_RIGHT:
                 break;
             default:
-                // Only insert ASCII printable characters (32–126)
+                // Only insert ASCII printable characters (32-126)
                 if (this->payload >= 32 && this->payload <= 126) {
                     requestFocus();
                     if (this->cursor == this->freetext.length()) {
@@ -1348,7 +1417,7 @@ int32_t CannedMessageModule::runOnce()
                                          this->freetext.substring(this->cursor);
                     }
                     this->cursor++;
-                    const uint16_t maxChars = 200 - (moduleConfig.canned_message.send_bell ? 1 : 0);
+                    const unsigned int maxChars = maxFreetextBytes();
                     if (this->freetext.length() > maxChars) {
                         this->cursor = maxChars;
                         this->freetext = this->freetext.substring(0, maxChars);
@@ -1393,8 +1462,8 @@ const char *CannedMessageModule::getNodeName(NodeNum node)
         return "Broadcast";
 
     meshtastic_NodeInfoLite *info = nodeDB->getMeshNode(node);
-    if (info && info->has_user && strlen(info->user.long_name) > 0) {
-        return info->user.long_name;
+    if (nodeInfoLiteHasUser(info) && strlen(info->long_name) > 0) {
+        return info->long_name;
     }
 
     static char fallback[12];
@@ -1408,13 +1477,6 @@ bool CannedMessageModule::shouldDraw()
     return (this->runState == CANNED_MESSAGE_RUN_STATE_ACTIVE || this->runState == CANNED_MESSAGE_RUN_STATE_FREETEXT ||
             this->runState == CANNED_MESSAGE_RUN_STATE_DESTINATION_SELECTION ||
             this->runState == CANNED_MESSAGE_RUN_STATE_EMOTE_PICKER);
-}
-
-// Has the user defined any canned messages?
-// Expose publicly whether canned message module is ready for use
-bool CannedMessageModule::hasMessages()
-{
-    return (this->messagesCount > 0);
 }
 
 int CannedMessageModule::getNextIndex()
@@ -1437,7 +1499,7 @@ int CannedMessageModule::getPrevIndex()
 
 #if defined(USE_VIRTUAL_KEYBOARD)
 
-String CannedMessageModule::keyForCoordinates(uint x, uint y)
+String CannedMessageModule::keyForCoordinates(int x, int y)
 {
     int outerSize = *(&this->keyboard[this->charSet] + 1) - this->keyboard[this->charSet];
 
@@ -1461,7 +1523,9 @@ void CannedMessageModule::drawKeyboard(OLEDDisplay *display, OLEDDisplayUiState 
 {
     int outerSize = *(&this->keyboard[this->charSet] + 1) - this->keyboard[this->charSet];
 
-    int xOffset = 0;
+    // Inset the key grid horizontally by the body L/R margin (keeps touch aligned since
+    // keyForCoordinates() reads the same per-key rects stored below)
+    int xOffset = BASEUI_BODY_LR_MARGIN;
 
     int yOffset = 56;
 
@@ -1471,7 +1535,8 @@ void CannedMessageModule::drawKeyboard(OLEDDisplay *display, OLEDDisplayUiState 
 
     display->setColor(OLEDDISPLAY_COLOR::WHITE);
 
-    display->drawStringMaxWidth(0, 0, display->getWidth(),
+    // Free text being typed is the first row of text: inset by header margins
+    display->drawStringMaxWidth(BASEUI_HEADER_LR_MARGIN, BASEUI_HEADER_MARGIN, display->getWidth() - 2 * BASEUI_HEADER_LR_MARGIN,
                                 cannedMessageModule->drawWithCursor(cannedMessageModule->freetext, cannedMessageModule->cursor));
 
     display->setFont(FONT_MEDIUM);
@@ -1493,7 +1558,7 @@ void CannedMessageModule::drawKeyboard(OLEDDisplay *display, OLEDDisplayUiState 
             }
         }
 
-        int cellWidth = display->width() / innerSize;
+        int cellWidth = (display->width() - 2 * BASEUI_BODY_LR_MARGIN) / innerSize;
 
         for (int8_t innerIndex = 0; innerIndex < innerSize; innerIndex++) {
             xOffset += innerIndex > 0 ? cellWidth : 0;
@@ -1566,7 +1631,7 @@ void CannedMessageModule::drawKeyboard(OLEDDisplay *display, OLEDDisplayUiState 
             }
         }
 
-        xOffset = 0;
+        xOffset = BASEUI_BODY_LR_MARGIN;
     }
 
     this->highlight = 0x00;
@@ -1656,8 +1721,8 @@ void CannedMessageModule::drawDestinationSelectionScreen(OLEDDisplay *display, O
     display->setTextAlignment(TEXT_ALIGN_LEFT);
     display->setFont(FONT_SMALL);
 
-    // Header
-    int titleY = 2;
+    // Header (first row): pushed down by the header margin; centered, so no L/R inset needed
+    int titleY = 2 + BASEUI_HEADER_MARGIN;
     String titleText = "Select Destination";
     titleText += searchQuery.length() > 0 ? " [" + searchQuery + "]" : " [ ]";
     display->setTextAlignment(TEXT_ALIGN_CENTER);
@@ -1686,65 +1751,63 @@ void CannedMessageModule::drawDestinationSelectionScreen(OLEDDisplay *display, O
 
         int xOffset = 0;
         int yOffset = row * (FONT_HEIGHT_SMALL - 4) + rowYOffset;
-        char entryText[64] = "";
+        std::string entryText;
 
         // Draw Channels First
         if (itemIndex < numActiveChannels) {
             uint8_t channelIndex = this->activeChannelIndices[itemIndex];
-            snprintf(entryText, sizeof(entryText), "#%s", channels.getName(channelIndex));
+            const char *channelName = channels.getName(channelIndex);
+            entryText = std::string("#") + (channelName ? channelName : "?");
         }
         // Then Draw Nodes
         else {
             int nodeIndex = itemIndex - numActiveChannels;
             if (nodeIndex >= 0 && nodeIndex < static_cast<int>(this->filteredNodes.size())) {
                 meshtastic_NodeInfoLite *node = this->filteredNodes[nodeIndex].node;
-                if (node && node->user.long_name) {
-                    strncpy(entryText, node->user.long_name, sizeof(entryText) - 1);
-                    entryText[sizeof(entryText) - 1] = '\0';
-                }
-                int availWidth = display->getWidth() -
-                                 ((graphics::currentResolution == graphics::ScreenResolution::High) ? 40 : 20) -
-                                 ((node && node->is_favorite) ? 10 : 0);
-                if (availWidth < 0)
-                    availWidth = 0;
-
-                size_t origLen = strlen(entryText);
-                while (entryText[0] && display->getStringWidth(entryText) > availWidth) {
-                    entryText[strlen(entryText) - 1] = '\0';
-                }
-                if (strlen(entryText) < origLen) {
-                    strcat(entryText, "...");
-                }
-
-                // Prepend "* " if this is a favorite
-                if (node && node->is_favorite) {
-                    size_t len = strlen(entryText);
-                    if (len + 2 < sizeof(entryText)) {
-                        memmove(entryText + 2, entryText, len + 1);
-                        entryText[0] = '*';
-                        entryText[1] = ' ';
-                    }
-                }
                 if (node) {
                     if (display->getWidth() <= 64) {
-                        snprintf(entryText, sizeof(entryText), "%s", node->user.short_name);
+                        entryText = node->short_name;
+                    } else if (node->long_name[0]) {
+                        entryText = node->long_name;
+                    } else {
+                        entryText = node->short_name;
                     }
                 }
+
+                int availWidth = display->getWidth() - 2 * BASEUI_BODY_LR_MARGIN -
+                                 ((graphics::currentResolution == graphics::ScreenResolution::High) ? 40 : 20) -
+                                 ((nodeInfoLiteIsFavorite(node)) ? 10 : 0);
+                if (availWidth < 0)
+                    availWidth = 0;
+                char truncatedEntry[96];
+                graphics::UIRenderer::truncateStringWithEmotes(display, entryText.c_str(), truncatedEntry, sizeof(truncatedEntry),
+                                                               availWidth);
+                entryText = truncatedEntry;
+
+                // Prepend "* " if this is a favorite
+                if (nodeInfoLiteIsFavorite(node)) {
+                    entryText = "* " + entryText;
+                }
+                graphics::UIRenderer::truncateStringWithEmotes(display, entryText.c_str(), truncatedEntry, sizeof(truncatedEntry),
+                                                               availWidth);
+                entryText = truncatedEntry;
             }
         }
 
-        if (strlen(entryText) == 0 || strcmp(entryText, "Unknown") == 0)
-            strcpy(entryText, "?");
+        if (entryText.empty() || entryText == "Unknown")
+            entryText = "?";
 
         // Highlight background (if selected)
         if (itemIndex == destIndex) {
             int scrollPadding = 8; // Reserve space for scrollbar
-            display->fillRect(0, yOffset + 2, display->getWidth() - scrollPadding, FONT_HEIGHT_SMALL - 5);
+            display->fillRect(BASEUI_BODY_LR_MARGIN, yOffset + 2, display->getWidth() - scrollPadding - 2 * BASEUI_BODY_LR_MARGIN,
+                              FONT_HEIGHT_SMALL - 5);
             display->setColor(BLACK);
         }
 
         // Draw entry text
-        display->drawString(xOffset + 2, yOffset, entryText);
+        graphics::UIRenderer::drawStringWithEmotes(display, xOffset + 2 + BASEUI_BODY_LR_MARGIN, yOffset, entryText.c_str(),
+                                                   FONT_HEIGHT_SMALL, 1, false);
         display->setColor(WHITE);
 
         // Draw key icon (after highlight)
@@ -1773,7 +1836,7 @@ void CannedMessageModule::drawDestinationSelectionScreen(OLEDDisplay *display, O
     if (totalEntries > visibleRows) {
         int scrollbarHeight = visibleRows * (FONT_HEIGHT_SMALL - 4);
         int totalScrollable = totalEntries;
-        int scrollTrackX = display->getWidth() - 6;
+        int scrollTrackX = display->getWidth() - 6 - BASEUI_BODY_LR_MARGIN;
         display->drawRect(scrollTrackX, rowYOffset, 4, scrollbarHeight);
         int scrollHeight = (scrollbarHeight * visibleRows) / totalScrollable;
         int scrollPos = rowYOffset + (scrollbarHeight * scrollIndex) / totalScrollable;
@@ -1785,19 +1848,14 @@ void CannedMessageModule::drawEmotePickerScreen(OLEDDisplay *display, OLEDDispla
 {
     const int headerFontHeight = FONT_HEIGHT_SMALL; // Make sure this matches your actual small font height
     const int headerMargin = 2;                     // Extra pixels below header
-    const int labelGap = 6;
+    const int labelGap = 4;
     const int bitmapGapX = 4;
 
-    // Find max emote height (assume all same, or precalculated)
-    int maxEmoteHeight = 0;
-    for (int i = 0; i < graphics::numEmotes; ++i)
-        if (graphics::emotes[i].height > maxEmoteHeight)
-            maxEmoteHeight = graphics::emotes[i].height;
-
+    const int maxEmoteHeight = graphics::EmoteRenderer::maxEmoteHeight();
     const int rowHeight = maxEmoteHeight + 2;
 
-    // Place header at top, then compute start of emote list
-    int headerY = y;
+    // Place header at top (pushed down by the header margin), then compute start of emote list
+    int headerY = y + BASEUI_HEADER_MARGIN;
     int listTop = headerY + headerFontHeight + headerMargin;
 
     int _visibleRows = (display->getHeight() - listTop - 2) / rowHeight;
@@ -1836,18 +1894,21 @@ void CannedMessageModule::drawEmotePickerScreen(OLEDDisplay *display, OLEDDispla
 
         // Draw highlight box 2px taller than emote (1px margin above and below)
         if (emoteIdx == emotePickerIndex) {
-            display->fillRect(x, rowY, display->getWidth() - 8, emote.height + 2);
+            display->fillRect(x + BASEUI_BODY_LR_MARGIN, rowY, display->getWidth() - 8 - 2 * BASEUI_BODY_LR_MARGIN,
+                              emote.height + 2);
             display->setColor(BLACK);
         }
 
-        // Emote bitmap (left), 1px margin from highlight bar top
-        int emoteY = rowY + 1;
-        display->drawXbm(x + bitmapGapX, emoteY, emote.width, emote.height, emote.bitmap);
+        // Emote bitmap (left), centered inside the row
+        int labelStartX = x + BASEUI_BODY_LR_MARGIN + bitmapGapX;
+        const int emoteY = rowY + ((rowHeight - emote.height) / 2);
+        display->drawXbm(labelStartX, emoteY, emote.width, emote.height, emote.bitmap);
+        labelStartX += emote.width;
 
         // Emote label (right of bitmap)
         display->setFont(FONT_MEDIUM);
         int labelY = rowY + ((rowHeight - FONT_HEIGHT_MEDIUM) / 2);
-        display->drawString(x + bitmapGapX + emote.width + labelGap, labelY, emote.label);
+        display->drawString(labelStartX + labelGap, labelY, emote.label);
 
         if (emoteIdx == emotePickerIndex)
             display->setColor(WHITE);
@@ -1856,7 +1917,7 @@ void CannedMessageModule::drawEmotePickerScreen(OLEDDisplay *display, OLEDDispla
     // Draw scrollbar if needed
     if (numEmotes > _visibleRows) {
         int scrollbarHeight = _visibleRows * rowHeight;
-        int scrollTrackX = display->getWidth() - 6;
+        int scrollTrackX = display->getWidth() - 6 - BASEUI_BODY_LR_MARGIN;
         display->drawRect(scrollTrackX, listTop, 4, scrollbarHeight);
         int scrollBarLen = std::max(6, (scrollbarHeight * _visibleRows) / numEmotes);
         int scrollBarPos = listTop + (scrollbarHeight * topIndex) / numEmotes;
@@ -1893,14 +1954,17 @@ void CannedMessageModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *st
     if (this->runState == CANNED_MESSAGE_RUN_STATE_DISABLED) {
         display->setTextAlignment(TEXT_ALIGN_LEFT);
         display->setFont(FONT_SMALL);
-        display->drawString(10 + x, 0 + y + FONT_HEIGHT_SMALL, "Canned Message\nModule disabled.");
+        display->drawString(10 + x + BASEUI_BODY_LR_MARGIN, y + FONT_HEIGHT_SMALL + BASEUI_HEADER_MARGIN,
+                            "Canned Message\nModule disabled.");
         return;
     }
 
     // Free Text Input Screen
     if (this->runState == CANNED_MESSAGE_RUN_STATE_FREETEXT) {
         requestFocus();
-#if defined(USE_EINK) && defined(USE_EINK_DYNAMICDISPLAY)
+#if defined(USE_EINK) && defined(MESHTASTIC_INCLUDE_NICHE_GRAPHICS) && !defined(MESHTASTIC_INCLUDE_INKHUD)
+        static_cast<NicheGraphics::BaseUIEInkDisplay *>(display)->enableUnlimitedFastMode();
+#elif defined(USE_EINK) && defined(USE_EINK_DYNAMICDISPLAY)
         EInkDynamicDisplay *einkDisplay = static_cast<EInkDynamicDisplay *>(display);
         einkDisplay->enableUnlimitedFastMode();
 #endif
@@ -1915,10 +1979,12 @@ void CannedMessageModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *st
 
         // Char count right-aligned
         if (runState != CANNED_MESSAGE_RUN_STATE_DESTINATION_SELECTION) {
-            uint16_t charsLeft =
-                meshtastic_Constants_DATA_PAYLOAD_LEN - this->freetext.length() - (moduleConfig.canned_message.send_bell ? 1 : 0);
+            // The limit the editor keeps to, not the whole payload: the counter showed 33 left when no more could be typed
+            const unsigned int used = this->freetext.length();
+            int charsLeft = used < maxFreetextBytes() ? (int)(maxFreetextBytes() - used) : 0;
             snprintf(buffer, sizeof(buffer), "%d left", charsLeft);
-            display->drawString(x + display->getWidth() - display->getStringWidth(buffer), y + 0, buffer);
+            display->drawString(x + display->getWidth() - display->getStringWidth(buffer) - BASEUI_HEADER_LR_MARGIN,
+                                y + BASEUI_HEADER_MARGIN, buffer);
         }
 
 #if INPUTBROKER_SERIAL_TYPE == 1
@@ -2005,93 +2071,11 @@ void CannedMessageModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *st
         // Draw Free Text input with multi-emote support and proper line wrapping
         display->setColor(WHITE);
         {
-            int inputY = 0 + y + FONT_HEIGHT_SMALL;
+            int inputY = y + FONT_HEIGHT_SMALL + BASEUI_HEADER_MARGIN;
+            int inputX = x + BASEUI_BODY_LR_MARGIN;
             String msgWithCursor = this->drawWithCursor(this->freetext, this->cursor);
-
-            // Tokenize input into (isEmote, token) pairs
-            const char *msg = msgWithCursor.c_str();
-            std::vector<std::pair<bool, String>> tokens = tokenizeMessageWithEmotes(msg);
-
-            // Advanced word-wrapping (emotes + text, split by word, wrap inside word if needed)
-            std::vector<std::vector<std::pair<bool, String>>> lines;
-            std::vector<std::pair<bool, String>> currentLine;
-            int lineWidth = 0;
-            int maxWidth = display->getWidth();
-            for (auto &token : tokens) {
-                if (token.first) {
-                    // Emote
-                    int tokenWidth = 0;
-                    for (int j = 0; j < graphics::numEmotes; j++) {
-                        if (token.second == graphics::emotes[j].label) {
-                            tokenWidth = graphics::emotes[j].width + 2;
-                            break;
-                        }
-                    }
-                    if (lineWidth + tokenWidth > maxWidth && !currentLine.empty()) {
-                        lines.push_back(currentLine);
-                        currentLine.clear();
-                        lineWidth = 0;
-                    }
-                    currentLine.push_back(token);
-                    lineWidth += tokenWidth;
-                } else {
-                    // Text: split by words and wrap inside word if needed
-                    String text = token.second;
-                    int pos = 0;
-                    while (pos < static_cast<int>(text.length())) {
-                        // Find next space (or end)
-                        int spacePos = text.indexOf(' ', pos);
-                        int endPos = (spacePos == -1) ? text.length() : spacePos + 1; // Include space
-                        String word = text.substring(pos, endPos);
-                        int wordWidth = display->getStringWidth(word);
-
-                        if (lineWidth + wordWidth > maxWidth && lineWidth > 0) {
-                            lines.push_back(currentLine);
-                            currentLine.clear();
-                            lineWidth = 0;
-                        }
-                        // If word itself too big, split by character
-                        if (wordWidth > maxWidth) {
-                            uint16_t charPos = 0;
-                            while (charPos < word.length()) {
-                                String oneChar = word.substring(charPos, charPos + 1);
-                                int charWidth = display->getStringWidth(oneChar);
-                                if (lineWidth + charWidth > maxWidth && lineWidth > 0) {
-                                    lines.push_back(currentLine);
-                                    currentLine.clear();
-                                    lineWidth = 0;
-                                }
-                                currentLine.push_back({false, oneChar});
-                                lineWidth += charWidth;
-                                charPos++;
-                            }
-                        } else {
-                            currentLine.push_back({false, word});
-                            lineWidth += wordWidth;
-                        }
-                        pos = endPos;
-                    }
-                }
-            }
-            if (!currentLine.empty())
-                lines.push_back(currentLine);
-
-            // Draw lines with emotes
-            int rowHeight = FONT_HEIGHT_SMALL;
-            int yLine = inputY;
-            for (const auto &line : lines) {
-                int nextX = x;
-                for (const auto &token : line) {
-                    if (token.first) {
-                        // Emote rendering centralized in helper
-                        renderEmote(display, nextX, yLine, rowHeight, token.second);
-                    } else {
-                        display->drawString(nextX, yLine, token.second);
-                        nextX += display->getStringWidth(token.second);
-                    }
-                }
-                yLine += rowHeight;
-            }
+            drawWrappedEmoteText(display, inputX, inputY, msgWithCursor.c_str(),
+                                 display->getWidth() - inputX - BASEUI_BODY_LR_MARGIN, FONT_HEIGHT_SMALL);
         }
 #endif
         return;
@@ -2106,14 +2090,14 @@ void CannedMessageModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *st
         const int baseRowSpacing = FONT_HEIGHT_SMALL - 4;
 
         int topMsg;
-        std::vector<int> rowHeights;
         int _visibleRows;
 
         // Draw header (To: ...)
         drawHeader(display, x, y, buffer);
 
         // Shift message list upward by 3 pixels to reduce spacing between header and first message
-        const int listYOffset = y + FONT_HEIGHT_SMALL - 3;
+        // Push the list below the header margin so the body starts clear of the reserved top area
+        const int listYOffset = y + FONT_HEIGHT_SMALL - 3 + BASEUI_HEADER_MARGIN;
         _visibleRows = (display->getHeight() - listYOffset) / baseRowSpacing;
 
         // Figure out which messages are visible and their needed heights
@@ -2122,63 +2106,34 @@ void CannedMessageModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *st
                      : 0;
         int countRows = std::min(messagesCount, _visibleRows);
 
-        // Build per-row max height based on all emotes in line
-        for (int i = 0; i < countRows; i++) {
-            const char *msg = getMessageByIndex(topMsg + i);
-            int maxEmoteHeight = 0;
-            for (int j = 0; j < graphics::numEmotes; j++) {
-                const char *label = graphics::emotes[j].label;
-                if (!label || !*label)
-                    continue;
-                const char *search = msg;
-                while ((search = strstr(search, label))) {
-                    if (graphics::emotes[j].height > maxEmoteHeight)
-                        maxEmoteHeight = graphics::emotes[j].height;
-                    search += strlen(label); // Advance past this emote
-                }
-            }
-            rowHeights.push_back(std::max(baseRowSpacing, maxEmoteHeight + 2));
-        }
-
         // Draw all message rows with multi-emote support
         int yCursor = listYOffset;
         for (int vis = 0; vis < countRows; vis++) {
             int msgIdx = topMsg + vis;
             int lineY = yCursor;
             const char *msg = getMessageByIndex(msgIdx);
-            int rowHeight = rowHeights[vis];
+            int rowHeight = getRowHeightForEmoteText(msg, baseRowSpacing);
             bool _highlight = (msgIdx == currentMessageIndex);
-
-            // Multi-emote tokenization
-            std::vector<std::pair<bool, String>> tokens = tokenizeMessageWithEmotes(msg);
 
             // Vertically center based on rowHeight
             int textYOffset = (rowHeight - FONT_HEIGHT_SMALL) / 2;
 
 #ifdef USE_EINK
-            int nextX = x + (_highlight ? 12 : 0);
+            int nextX = x + BASEUI_BODY_LR_MARGIN + (_highlight ? 12 : 0);
             if (_highlight)
-                display->drawString(x + 0, lineY + textYOffset, ">");
+                display->drawString(x + BASEUI_BODY_LR_MARGIN, lineY + textYOffset, ">");
 #else
             int scrollPadding = 8;
             if (_highlight) {
-                display->fillRect(x + 0, lineY, display->getWidth() - scrollPadding, rowHeight);
+                display->fillRect(x + BASEUI_BODY_LR_MARGIN, lineY,
+                                  display->getWidth() - scrollPadding - 2 * BASEUI_BODY_LR_MARGIN, rowHeight);
                 display->setColor(BLACK);
             }
-            int nextX = x + (_highlight ? 2 : 0);
+            int nextX = x + BASEUI_BODY_LR_MARGIN + (_highlight ? 2 : 0);
 #endif
 
-            // Draw all tokens left to right
-            for (const auto &token : tokens) {
-                if (token.first) {
-                    // Emote rendering centralized in helper
-                    renderEmote(display, nextX, lineY, rowHeight, token.second);
-                } else {
-                    // Text
-                    display->drawString(nextX, lineY + textYOffset, token.second);
-                    nextX += display->getStringWidth(token.second);
-                }
-            }
+            if (msg && *msg)
+                drawCenteredEmoteText(display, nextX, lineY, rowHeight, msg);
 #ifndef USE_EINK
             if (_highlight)
                 display->setColor(WHITE);
@@ -2190,7 +2145,7 @@ void CannedMessageModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *st
         // Scrollbar
         if (messagesCount > _visibleRows) {
             int scrollHeight = display->getHeight() - listYOffset;
-            int scrollTrackX = display->getWidth() - 6;
+            int scrollTrackX = display->getWidth() - 6 - BASEUI_BODY_LR_MARGIN;
             display->drawRect(scrollTrackX, listYOffset, 4, scrollHeight);
             int barHeight = (scrollHeight * _visibleRows) / messagesCount;
             int scrollPos = listYOffset + (scrollHeight * topMsg) / messagesCount;
@@ -2203,23 +2158,24 @@ void CannedMessageModule::drawFrame(OLEDDisplay *display, OLEDDisplayUiState *st
 static float getSnrLimit(meshtastic_Config_LoRaConfig_ModemPreset preset)
 {
     switch (preset) {
-    case meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW:
-    case meshtastic_Config_LoRaConfig_ModemPreset_LONG_MODERATE:
-    case meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST:
+    case PRESET(LONG_SLOW):
+    case PRESET(LONG_MODERATE):
+    case PRESET(LONG_FAST):
         return -6.0f;
-    case meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_SLOW:
-    case meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST:
+    case PRESET(MEDIUM_SLOW):
+    case PRESET(MEDIUM_FAST):
+    case PRESET(MEDIUM_TURBO):
         return -5.5f;
-    case meshtastic_Config_LoRaConfig_ModemPreset_SHORT_SLOW:
-    case meshtastic_Config_LoRaConfig_ModemPreset_SHORT_FAST:
-    case meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO:
+    case PRESET(SHORT_SLOW):
+    case PRESET(SHORT_FAST):
+    case PRESET(SHORT_TURBO):
         return -4.5f;
     default:
         return -6.0f;
     }
 }
 
-// Return Good/Fair/Bad label and set 1–5 bars based on SNR and RSSI
+// Return Good/Fair/Bad label and set 1-5 bars based on SNR and RSSI
 static const char *getSignalGrade(float snr, int32_t rssi, float snrLimit, int &bars)
 {
     // 5-bar logic: strength inside Good/Fair/Bad category
@@ -2338,19 +2294,19 @@ ProcessMessage CannedMessageModule::handleReceived(const meshtastic_MeshPacket &
                         snprintf(buf, sizeof(buf), "Message sent to\n#%s\n\nSignal: %s",
                                  (channelName && channelName[0]) ? channelName : "unknown", qualityLabel);
                     } else {
-                        snprintf(buf, sizeof(buf), "DM sent to\n@%s\n\nSignal: %s",
-                                 (nodeName && nodeName[0]) ? nodeName : "unknown", qualityLabel);
+                        snprintf(buf, sizeof(buf), "DM sent to\n@%s\n\nSignal: %s", nodeName[0] ? nodeName : "unknown",
+                                 qualityLabel);
                     }
                 } else if (isAck && !isFromDest) {
                     // Relay ACK banner
                     snprintf(buf, sizeof(buf), "DM Relayed\n(Status Unknown)\n%s\n\nSignal: %s",
-                             (nodeName && nodeName[0]) ? nodeName : "unknown", qualityLabel);
+                             nodeName[0] ? nodeName : "unknown", qualityLabel);
                 } else {
                     if (this->lastSentNode == NODENUM_BROADCAST) {
                         snprintf(buf, sizeof(buf), "Message failed to\n#%s",
                                  (channelName && channelName[0]) ? channelName : "unknown");
                     } else {
-                        snprintf(buf, sizeof(buf), "DM failed to\n@%s", (nodeName && nodeName[0]) ? nodeName : "unknown");
+                        snprintf(buf, sizeof(buf), "DM failed to\n@%s", nodeName[0] ? nodeName : "unknown");
                     }
                 }
 
@@ -2400,7 +2356,12 @@ bool CannedMessageModule::saveProtoForModule()
  */
 void CannedMessageModule::installDefaultCannedMessageModuleConfig()
 {
+#ifdef USERPREFS_CANNED_MESSAGES
+    strncpy(cannedMessageModuleConfig.messages, USERPREFS_CANNED_MESSAGES, sizeof(cannedMessageModuleConfig.messages));
+    cannedMessageModuleConfig.messages[sizeof(cannedMessageModuleConfig.messages) - 1] = '\0';
+#else
     strncpy(cannedMessageModuleConfig.messages, "Hi|Bye|Yes|No|Ok", sizeof(cannedMessageModuleConfig.messages));
+#endif
 }
 
 /**
@@ -2441,7 +2402,6 @@ AdminMessageHandleResult CannedMessageModule::handleAdminMessageForModule(const 
 void CannedMessageModule::handleGetCannedMessageModuleMessages(const meshtastic_MeshPacket &req,
                                                                meshtastic_AdminMessage *response)
 {
-    LOG_DEBUG("*** handleGetCannedMessageModuleMessages");
     if (req.decoded.want_response) {
         response->which_payload_variant = meshtastic_AdminMessage_get_canned_message_module_messages_response_tag;
         strncpy(response->get_canned_message_module_messages_response, cannedMessageModuleConfig.messages,
@@ -2456,7 +2416,7 @@ void CannedMessageModule::handleSetCannedMessageModuleMessages(const char *from_
     if (*from_msg) {
         changed |= strcmp(cannedMessageModuleConfig.messages, from_msg);
         strncpy(cannedMessageModuleConfig.messages, from_msg, sizeof(cannedMessageModuleConfig.messages));
-        LOG_DEBUG("*** from_msg.text:%s", from_msg);
+        LOG_TRACE("*** from_msg.text:%s", from_msg);
     }
 
     if (changed) {
@@ -2465,6 +2425,12 @@ void CannedMessageModule::handleSetCannedMessageModuleMessages(const char *from_
             moduleConfig.canned_message.enabled = true;
         }
     }
+}
+
+unsigned int CannedMessageModule::maxFreetextBytes() const
+{
+    // Below the payload size (meshtastic_Constants_DATA_PAYLOAD_LEN, 233)
+    return 200 - (moduleConfig.canned_message.send_bell ? 1 : 0);
 }
 
 String CannedMessageModule::drawWithCursor(String text, int cursor)

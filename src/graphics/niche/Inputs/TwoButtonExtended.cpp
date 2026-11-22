@@ -156,6 +156,24 @@ void TwoButtonExtended::setJoystickWiring(uint8_t uPin, uint8_t dPin, uint8_t lP
     pinMode(joystick[Direction::RIGHT].pin, internalPullup ? INPUT_PULLUP : INPUT);
 }
 
+// Configures only left/right joystick directions for a two-way rocker
+void TwoButtonExtended::setTwoWayRockerWiring(uint8_t leftPin, uint8_t rightPin, bool internalPullup)
+{
+    if (leftPin == rightPin) {
+        LOG_WARN("Attempted reuse of TwoWayRocker GPIO. Ignoring assignment");
+        return;
+    }
+
+    joystick[Direction::UP].pin = 0xFF;
+    joystick[Direction::DOWN].pin = 0xFF;
+    joystick[Direction::LEFT].pin = leftPin;
+    joystick[Direction::RIGHT].pin = rightPin;
+    joystickActiveLogic = LOW;
+
+    pinMode(joystick[Direction::LEFT].pin, internalPullup ? INPUT_PULLUP : INPUT);
+    pinMode(joystick[Direction::RIGHT].pin, internalPullup ? INPUT_PULLUP : INPUT);
+}
+
 void TwoButtonExtended::setTiming(uint8_t whichButton, uint32_t debounceMs, uint32_t longpressMs)
 {
     assert(whichButton < 2);
@@ -176,14 +194,6 @@ void TwoButtonExtended::setHandlerDown(uint8_t whichButton, Callback onDown)
     buttons[whichButton].onDown = onDown;
 }
 
-// Set what should happen when a button becomes unpressed
-// Use this to implement a "While held" behavior
-void TwoButtonExtended::setHandlerUp(uint8_t whichButton, Callback onUp)
-{
-    assert(whichButton < 2);
-    buttons[whichButton].onUp = onUp;
-}
-
 // Set what should happen when a "short press" event has occurred
 void TwoButtonExtended::setHandlerShortPress(uint8_t whichButton, Callback onPress)
 {
@@ -199,32 +209,19 @@ void TwoButtonExtended::setHandlerLongPress(uint8_t whichButton, Callback onLong
     buttons[whichButton].onLongPress = onLongPress;
 }
 
-// Set what should happen when a joystick button becomes pressed
-// Use this to implement a "while held" behavior
-void TwoButtonExtended::setJoystickDownHandlers(Callback uDown, Callback dDown, Callback lDown, Callback rDown)
-{
-    joystick[Direction::UP].onDown = uDown;
-    joystick[Direction::DOWN].onDown = dDown;
-    joystick[Direction::LEFT].onDown = lDown;
-    joystick[Direction::RIGHT].onDown = rDown;
-}
-
-// Set what should happen when a joystick button becomes unpressed
-// Use this to implement a "while held" behavior
-void TwoButtonExtended::setJoystickUpHandlers(Callback uUp, Callback dUp, Callback lUp, Callback rUp)
-{
-    joystick[Direction::UP].onUp = uUp;
-    joystick[Direction::DOWN].onUp = dUp;
-    joystick[Direction::LEFT].onUp = lUp;
-    joystick[Direction::RIGHT].onUp = rUp;
-}
-
 // Set what should happen when a "press" event has fired
 // Note: this will occur while the joystick button is still held
 void TwoButtonExtended::setJoystickPressHandlers(Callback uPress, Callback dPress, Callback lPress, Callback rPress)
 {
     joystick[Direction::UP].onPress = uPress;
     joystick[Direction::DOWN].onPress = dPress;
+    joystick[Direction::LEFT].onPress = lPress;
+    joystick[Direction::RIGHT].onPress = rPress;
+}
+
+// Set press handlers for a two-way rocker mapped to left/right directions
+void TwoButtonExtended::setTwoWayRockerPressHandlers(Callback lPress, Callback rPress)
+{
     joystick[Direction::LEFT].onPress = lPress;
     joystick[Direction::RIGHT].onPress = rPress;
 }

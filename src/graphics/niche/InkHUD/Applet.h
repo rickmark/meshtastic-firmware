@@ -15,6 +15,7 @@
 
 #include <GFX.h> // GFXRoot drawing lib
 
+#include "mesh/MeshModule.h"
 #include "mesh/MeshTypes.h"
 
 #include "./AppletFont.h"
@@ -103,6 +104,15 @@ class Applet : public GFX
     virtual void onFreeText(char c) {}
     virtual void onFreeTextDone() {}
     virtual void onFreeTextCancel() {}
+    // Absolute display-space touch point, for touch-friendly UI interactions.
+    // Return true if consumed.
+    virtual bool onTouchPoint(uint16_t x, uint16_t y, bool longPress)
+    {
+        (void)x;
+        (void)y;
+        (void)longPress;
+        return false;
+    }
     // List of inputs which can be subscribed to
     enum InputMask {      // | No Joystick  |     With Joystick     |
         BUTTON_SHORT = 1, // | Button Click | Joystick Center Click |
@@ -117,6 +127,10 @@ class Applet : public GFX
     bool isInputSubscribed(InputMask input); // Check if input should be handled by applet, this should not be overloaded.
 
     virtual bool approveNotification(Notification &n); // Allow an applet to veto a notification
+
+    virtual class MapApplet *asMapApplet() { return nullptr; } // Returns non-null only for MapApplet and its subclasses
+    virtual class WaypointListApplet *asWaypointListApplet() { return nullptr; } // Returns non-null only for WaypointListApplet
+    virtual class StepsApplet *asStepsApplet() { return nullptr; }
 
     static uint16_t getHeaderHeight(); // How tall the "standard" applet header is
 
@@ -157,7 +171,8 @@ class Applet : public GFX
     void printWrapped(int16_t left, int16_t top, uint16_t width, const std::string &text); // Per-word line wrapping
 
     void hatchRegion(int16_t x, int16_t y, uint16_t w, uint16_t h, uint8_t spacing, Color color); // Fill with sparse lines
-    void drawHeader(const std::string &text); // Draw the standard applet header
+    void drawHeader(const std::string &text);                   // Draw the standard applet header
+    void drawScrollHints(bool canScrollUp, bool canScrollDown); // Small arrows at the right edge, if there is more to see
 
     // Meshtastic Logo
 
@@ -171,7 +186,6 @@ class Applet : public GFX
     SignalStrength getSignalStrength(float snr, float rssi);   // Interpret SNR and RSSI, as an easy to understand value
     std::string getTimeString(uint32_t epochSeconds);          // Human readable
     std::string getTimeString();                               // Current time, human readable
-    uint16_t getActiveNodeCount();                             // Duration determined by user, in onscreen menu
     std::string localizeDistance(uint32_t meters);             // Human readable distance, imperial or metric
     std::string parse(const std::string &text);                // Handle text which might contain special chars
     std::string parseShortName(meshtastic_NodeInfoLite *node); // Get the shortname, or a substitute if has unprintable chars

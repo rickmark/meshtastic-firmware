@@ -20,8 +20,8 @@ Suggest a max of two channel, to minimize fs usage?
 
 #include "configuration.h"
 
+#include "MessageStore.h"
 #include "graphics/niche/InkHUD/Applet.h"
-#include "graphics/niche/InkHUD/MessageStore.h"
 
 #include "modules/TextMessageModule.h"
 
@@ -41,16 +41,22 @@ class ThreadedMessageApplet : public Applet, public SinglePortModule
     void onActivate() override;
     void onDeactivate() override;
     void onShutdown() override;
+    void onNavUp() override;   // Older messages
+    void onNavDown() override; // Newer messages
     ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
 
     bool approveNotification(Notification &n) override; // Which notifications to suppress
 
   protected:
-    void saveMessagesToFlash();
     void loadMessagesFromFlash();
 
-    MessageStore *store; // Messages, held in RAM for use, ready to save to flash on shutdown
     uint8_t channelIndex = 0;
+
+  private:
+    size_t countChannelMessages();
+    void scrollBy(int delta);
+
+    size_t scrollOffset = 0; // Newest messages of this channel skipped, to show older ones
 };
 
 } // namespace NicheGraphics::InkHUD
